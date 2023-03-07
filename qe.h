@@ -53,14 +53,17 @@
 #endif
 
 #ifndef DEFAULT_TAB_WIDTH
-#define DEFAULT_TAB_WIDTH  4 /* used to be 8 */
+#define DEFAULT_TAB_WIDTH  8 /* used to be 8 */
 #endif
 #ifndef DEFAULT_INDENT_WIDTH
-#define DEFAULT_INDENT_WIDTH  4 /* used to be 8 */
+#define DEFAULT_INDENT_WIDTH  8 /* used to be 8 */
 #endif
 #ifndef DEFAULT_FILL_COLUMN
 #define DEFAULT_FILL_COLUMN  70
 #endif
+
+#define DEFAULT_INDENT_TABS_MDOE
+#define DEFAULT_BACKUP_INHIBITED
 
 /************************/
 

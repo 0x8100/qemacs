@@ -320,6 +320,12 @@ static const CmdDef basic_commands[] = {
     CMD0( "other-window", "C-x o",
           "Move the focus to another window",
           do_other_window)
+    CMD0( "other-window", "C-x SPC",
+          "Move the focus to another window",
+          do_other_window)
+    CMD0( "other-window", "C-x C-SPC",
+          "Move the focus to another window",
+          do_other_window)
     CMD0( "next-window", "C-x n",
           "Move the focus to the next window",
           do_other_window)
@@ -370,7 +376,13 @@ static const CmdDef basic_commands[] = {
     CMD3( "split-window-vertically", "C-x 2",
           "Split the current window top and bottom",
           do_split_window, ESii, "P" "v", SW_STACKED)
+    CMD3( "split-window-vertically", "C-x -",
+          "Split the current window top and bottom",
+          do_split_window, ESii, "P" "v", SW_STACKED)
     CMD3( "split-window-horizontally", "C-x 3",
+          "Split the current window side by side",
+          do_split_window, ESii, "P" "v", SW_SIDE_BY_SIDE)
+    CMD3( "split-window-horizontally", "C-x VB",
           "Split the current window side by side",
           do_split_window, ESii, "P" "v", SW_SIDE_BY_SIDE)
     CMD0( "toggle-full-screen", "C-c f",

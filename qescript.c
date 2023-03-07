@@ -948,6 +948,11 @@ static int qe_cfg_assign(QEmacsDataSource *ds, QEValue *sp, int op) {
     // XXX: should detect and report read-only variables and invalid assignments
 #else
     qe_cfg_tonum(ds, sp + 1);
+
+#ifdef DEFAULT_INDENT_TABS_MODE
+    ds->s->indent_tabs_mode = 1;
+#endif
+
     if (strequal(sp->u.str, "tab-width")) {
         ds->s->b->tab_width = sp[1].u.value;
     } else
@@ -1157,6 +1162,10 @@ static int qe_cfg_call(QEmacsDataSource *ds, QEValue *sp, const CmdDef *d) {
         qe_cfg_free_args(ds, nb_args, args, args_type);
         return -1;
     }
+
+#ifdef DEFAULT_BACKUP_INHIBITED
+    qs->backup_inhibited = 1;
+#endif
 
     qs->this_cmd_func = d->action.func;
     qs->ec.function = d->name;

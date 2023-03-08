@@ -2219,9 +2219,6 @@ void do_duplicate_line(EditState *s, int n)
         return;
 
     do_copy_whole_line(s, n);
-    do_eol(s);
-
-    do_newline(s);
     do_yank(s);
 }
 

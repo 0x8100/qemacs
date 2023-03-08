@@ -2186,6 +2186,45 @@ void do_kill_whole_line(EditState *s, int n)
         do_kill(s, p1, p2, dir, 0);
 }
 
+void do_copy_whole_line(EditState *s, int n)
+{
+    // XXX: should not modify s->offset
+    // XXX: should fix behavior for binary and hex modes
+    int p1 = 0, p2 = 0, dir = n;
+    if (n < 0) {
+        do_eol(s);
+        p1 = s->offset;
+        while (n++ < 0 && s->offset > 0) {
+            do_bol(s);
+            s->offset = eb_prev(s->b, s->offset);
+        }
+        p2 = s->offset;
+    } else
+    if (n > 0) {
+        do_bol(s);
+        p1 = s->offset;
+        while (n-- > 0 && s->offset < s->b->total_size) {
+            do_eol(s);
+            s->offset = eb_next(s->b, s->offset);
+        }
+        p2 = s->offset;
+    }
+    if (p1 != p2)
+        do_kill(s, p1, p2, dir, 1);
+}
+
+void do_duplicate_line(EditState *s, int n)
+{
+    if (s->b->flags & (BF_PREVIEW | BF_READONLY))
+        return;
+
+    do_copy_whole_line(s, n);
+    do_eol(s);
+
+    do_newline(s);
+    do_yank(s);
+}
+
 void do_kill_word(EditState *s, int n)
 {
     int start = s->offset;

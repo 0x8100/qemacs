@@ -151,7 +151,7 @@ static const CmdDef basic_commands[] = {
     CMD2( "kill-line", "C-k",
           "Kill to the end of line",
           do_kill_line, ESi, "P")
-    CMD2( "kill-whole-line", "M-k", // should be C-S-Backspace
+    CMD2( "kill-whole-line", "", // should be C-S-Backspace
           "Kill the line at point",
           do_kill_whole_line, ESi, "p")
     CMD2( "kill-beginning-of-line", "",

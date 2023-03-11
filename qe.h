@@ -63,7 +63,7 @@
 #endif
 
 #define DEFAULT_INDENT_TABS_MDOE
-#define DEFAULT_BACKUP_INHIBITED
+#define FORCE_PROHIBIT_BACKUP
 
 /************************/
 

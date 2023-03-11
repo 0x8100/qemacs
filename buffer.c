@@ -2763,6 +2763,7 @@ int eb_save_buffer(EditBuffer *b)
     if (stat(filename, &st) == 0)
         st_mode = st.st_mode & 0777;
 
+#ifndef FORCE_PROHIBIT_BACKUP
     if (!qs->backup_inhibited
     &&  strlen(filename) < MAX_FILENAME_SIZE - 1) {
         /* backup old file if present */
@@ -2771,6 +2772,7 @@ int eb_save_buffer(EditBuffer *b)
             rename(filename, buf1);
         }
     }
+#endif
 
     /* CG: should pass st_mode to buffer_save */
     ret = b->data_type->buffer_save(b, 0, b->total_size, filename);

@@ -1163,10 +1163,6 @@ static int qe_cfg_call(QEmacsDataSource *ds, QEValue *sp, const CmdDef *d) {
         return -1;
     }
 
-#ifdef DEFAULT_BACKUP_INHIBITED
-    qs->backup_inhibited = 1;
-#endif
-
     qs->this_cmd_func = d->action.func;
     qs->ec.function = d->name;
     call_func(d->sig, d->action, nb_args, args, args_type);

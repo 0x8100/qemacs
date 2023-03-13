@@ -154,13 +154,13 @@ static const CmdDef basic_commands[] = {
     CMD2( "kill-whole-line", "", // should be C-S-Backspace
           "Kill the line at point",
           do_kill_whole_line, ESi, "p")
-    CMD2( "copy-whole-line", "M-K",
+    CMD2( "copy-whole-line", "",
           "Copy the line at point",
           do_copy_whole_line, ESi, "p")
     CMD2( "duplicate-line", "M-k",
           "Duplicate the line at point",
           do_duplicate_line, ESi, "p")
-    CMD2( "kill-beginning-of-line", "",
+    CMD2( "kill-beginning-of-line", "M-K",
           "Kill to the beginning of the line",
           do_kill_beginning_of_line, ESi, "P")
     CMD2( "backward-kill-word", "M-DEL, M-C-h",

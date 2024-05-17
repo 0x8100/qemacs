@@ -1,8 +1,7 @@
 > **NOTE**
 > 
 >  This branch contains some personal modifications. 
->  Changes added by https://github.com/0x8100 are 
->  distributed under the MIT License.
+>  Changes added are distributed under the MIT License.
 
 # Quick Emacs (QEmacs)
 

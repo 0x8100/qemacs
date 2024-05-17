@@ -2,7 +2,7 @@
  * C mode for QEmacs.
  *
  * Copyright (c) 2001-2002 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -533,15 +533,21 @@ static void c_colorize_line(QEColorizeContext *cp,
         normal:
             if (state & IN_C_PREPROCESS)
                 break;
-            if (qe_isdigit(c)) {
+            if (qe_isdigit(c) || (c == '.' && qe_isdigit(str[i + 1]))) {
+                /* XXX: parsing ppnumbers, which is OK for C and C++ */
                 /* XXX: should parse actual number syntax */
                 /* XXX: D ignores embedded '_' and accepts l,u,U,f,F,i suffixes */
                 /* XXX: Java accepts 0b prefix for binary literals,
                  * ignores '_' between digits and accepts 'l' or 'L' suffixes */
                 /* scala ignores '_' in integers */
                 /* XXX: should parse decimal and hex floating point syntaxes */
+                /* C23/C++ syntax:
+                   - accept ' between digits including hex and exponent part
+                   - new suffixes: wb, WB, df, dd, dl, DF, DD, DL */
                 /* 2 dots in a row are a range operator, not a decimal point */
-                while (qe_isalnum_(str[i]) || (str[i] == '.' && str[i + 1] != '.')) {
+                while (qe_isalnum_(str[i])
+                ||     (str[i] == '\'' && qe_isalnum(str[i + 1]))
+                ||     (str[i] == '.' && str[i + 1] != '.')) {
                     i++;
                 }
                 SET_COLOR(str, start, i, C_STYLE_NUMBER);
@@ -1808,13 +1814,22 @@ static void js_colorize_line(QEColorizeContext *cp,
             }
             continue;
         case '#':       /* preprocessor */
-            if (start == 0 && str[i] == '!') {
+            /* v8: #include */
+            if (start == 0 &&
+                (str[i] == '!' ||
+                 (flavor == CLANG_V8 &&
+                  ustrstart(str + i + 1, "include", NULL))))
+            {
                 /* recognize a shebang comment line */
                 style = C_STYLE_PREPROCESS;
                 i = n;
                 break;
             }
             continue;
+        case '@':       /* annotations */
+            i += get_js_identifier(kbuf, countof(kbuf), c, str, i, n);
+            style = C_STYLE_PREPROCESS;
+            break;
         case '`':       /* ECMA 6 template strings */
         parse_string_bq:
             state |= IN_C_STRING_BQ;
@@ -1922,10 +1937,12 @@ static void js_colorize_line(QEColorizeContext *cp,
                 if (cp->state_only && !tag)
                     continue;
 
-                /* keywords used as object property tags are regular identifiers */
-                if (strfind(syn->keywords, kbuf) &&
-                    // XXX: this is incorrect for `default` inside a switch statement */
-                    str[i] != ':' && (start == 0 || str[start - 1] != '.')) {
+                /* keywords used as object property tags are regular identifiers.
+                 * `default` is always considered a keyword as the context cannot be
+                   determined precisely by this simplistic lexical parser */
+                if (strfind(syn->keywords, kbuf)
+                &&  (str[i] != ':' || strequal(kbuf, "default"))
+                &&  (start == 0 || str[start - 1] != '.')) {
                     style = C_STYLE_KEYWORD;
                     break;
                 }
@@ -1993,6 +2010,60 @@ ModeDef js_mode = {
     .shell_handlers = "node",
     .colorize_func = js_colorize_line,
     .colorize_flags = CLANG_JS | CLANG_REGEX,
+    .keywords = js_keywords,
+    .types = js_types,
+    .indent_func = c_indent_line,
+    .auto_indent = 1,
+    .fallback = &c_mode,
+};
+
+/*---------------- V8 Torque programming language ----------------*/
+
+static const char v8_keywords[] = {
+    /* constants */
+    "undefined|null|true|false|Infinity|NaN|"
+    /* classic keywords */
+    "import|let|const|return|if|else|break|continue|for|while|case|"
+    "class|extends|struct|constexpr|extern|namespace|goto|"
+    /* V8 specific */
+    "typeswitch|tail|debug|enum|"
+    "dcheck|check|static_assert|transitioning|operator|"
+    "transient|shape|bitfield|intrinsic|javascript|"
+    "macro|generates|otherwise|builtin|implicit|weak|"
+    "never|label|labels|unreachable|runtime|deferred|"
+};
+
+static const char v8_types[] = {
+    "void|var|type|bool|string|bit|"
+    "int8|int16|int31|int32|int64|uint8|uint16|uint31|uint32|uint64|"
+    "intptr|uintptr|bint|float16|float32|float64|"
+    "ByteArray|Object|Map|JSAny|JSFunction|JSObject|Smi|String|Number|"
+};
+
+static ModeDef v8_mode = {
+    .name = "V8 Torque",
+    .alt_name = "tq",
+    .extensions = "tq",
+    .colorize_func = js_colorize_line,
+    .colorize_flags = CLANG_V8 | CLANG_REGEX,
+    .keywords = v8_keywords,
+    .types = v8_types,
+    .indent_func = c_indent_line,
+    .auto_indent = 1,
+    .fallback = &c_mode,
+};
+
+/*---------------- Bee language syntax ----------------*/
+
+/* work in progress */
+
+static ModeDef bee_mode = {
+    .name = "Bee",
+    .alt_name = "bee",
+    .extensions = "bee",
+    .shell_handlers = "node",
+    .colorize_func = js_colorize_line,
+    .colorize_flags = CLANG_BEE | CLANG_REGEX,
     .keywords = js_keywords,
     .types = js_types,
     .indent_func = c_indent_line,
@@ -2787,13 +2858,17 @@ static ModeDef enscript_mode = {
 /*---------------- QuickScript programming language ----------------*/
 
 static const char qs_keywords[] = {
-    "break|case|class|continue|def|default|del|delete|do|else|for|"
-    "function|if|module|new|return|self|string|struct|switch|this|"
-    "typeof|while|"
+    "break|case|catch|class|continue|default|delete|do|else|"
+    "finally|for|function|if|import|in|instanceof|module|new|"
+    "return|switch|this|throw|try|typeof|while|"
+    "true|false|null|void|"
+    "get|set|"
+    "struct|self|def|func|as|from|arguments|target|super|"
 };
 
 static const char qs_types[] = {
-    "var|const|let|char|int|void|Array|Char|Function|Number|Object|String|"
+    "const|let|var|bool|char|double|int|string|"
+    "Array|Boolean|Function|Number|Object|String|Date|"
 };
 
 static int qs_mode_probe(ModeDef *mode, ModeProbeData *p)
@@ -2813,7 +2888,7 @@ static ModeDef qscript_mode = {
     .name = "QScript",
     .alt_name = "qs",
     .extensions = "qe|qs",
-    .shell_handlers = "qscript|qs",
+    .shell_handlers = "qscript|qs|qsn",
     .mode_probe = qs_mode_probe,
     .colorize_func = js_colorize_line,
     .colorize_flags = CLANG_QSCRIPT | CLANG_STR3 | CLANG_REGEX,
@@ -3023,6 +3098,7 @@ static const char kotlin_keywords[] = {
     "class|object|interface|public|private|protected|internal|inner|"
     "constructor|this|super|open|override|final|abstract|enum|companion|"
     "vararg|inline|reified|annotation|data|"
+    "infix|operator|step|downTo|until|lazy|with|also|"
     //"get|set|"  // do not colorize as keyword because used as function
     //"case|def|extends|forSome|implicit|lazy|"  // unused java keywords
     //"match|new|sealed|trait|type|with|yield|"  // unused java keywords
@@ -3769,6 +3845,8 @@ static int c_init(void)
     qe_register_commands(&c_mode, c_commands, countof(c_commands));
     qe_register_mode(&cpp_mode, MODEF_SYNTAX);
     qe_register_mode(&js_mode, MODEF_SYNTAX);
+    qe_register_mode(&v8_mode, MODEF_SYNTAX);
+    qe_register_mode(&bee_mode, MODEF_SYNTAX);
     qe_register_mode(&java_mode, MODEF_SYNTAX);
     qe_register_mode(&php_mode, MODEF_SYNTAX);
     qe_register_mode(&go_mode, MODEF_SYNTAX);

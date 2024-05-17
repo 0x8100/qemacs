@@ -1,5 +1,5 @@
 /*
- * Ruby language mode for QEmacs.
+ * Crystal language mode for QEmacs.
  *
  * Copyright (c) 2000-2023 Charlie Gordon.
  *
@@ -24,56 +24,66 @@
 
 #include "qe.h"
 
-/*---------------- Ruby script coloring ----------------*/
+/*---------------- Crystal coloring ----------------*/
 
-static char const ruby_keywords[] = {
-    "|__ENCODING__|__END__|__FILE__|__LINE__"
-    "|BEGIN|END|alias|and|assert|begin|break"
-    "|call|case|catch|class|def|defined?|do"
-    "|else|elsif|end|ensure|eval|exit|extend"
-    "|false|for|if|in|include|lambda|lambda?|loop"
-    "|module|new|next|nil|not|or|private|proc"
-    "|raise|refute|require|rescue|retry|return"
-    "|self|super|then|throw|true|unless|until"
-    "|when|while|yield"
+static char const crystal_keywords[] = {
+    // atomWords
+    "|false|nil|true|self"
+    // keywords
+    "|abstract|alias|annotation|asm|begin|break|case|class"
+    "|def|do|else|elsif|end|ensure|enum|extend|for|fun"
+    "|if|in|include|instance_sizeof|lib|macro|module"
+    "|next|of|offsetof|out|pointerof|private|protected|require"
+    "|rescue|return|select|sizeof|struct|super"
+    "|then|type|typeof|union|uninitialized|unless|until"
+    "|verbatim|when|while|with|yield"
+    // pseudo keywords
+    "|as|as?|in|is_a?|nil|nil?|responds_to?"
+    // PREPROC
+    "|__DIR__|__END_LINE__|__FILE__|__LINE__"
+    //???
+    //"|describe|eq|getter|getter?|it|loop|property|property!|property?"
+    //"|raise|record|spawn|"
+    //???
+    //"|and|as|assert|continue|del|except|finally|for|from|global"
+    //"|import|in|is|lambda|nonlocal|not|or|pass|raise|try|"
     "|"
 };
 
-/* Ruby operators:
- *  `  +  -  +@  -@  *  /  %  <<  >>  <  <=  >  >=  =
- *  ==  ===  <=>  []  []=  **  !  ~  !=  !~  =~  &  |  ^
- */
-
-enum {
-    IN_RUBY_HEREDOC   = 0x80,
-    IN_RUBY_HD_INDENT = 0x40,
-    IN_RUBY_HD_SIG    = 0x3f,
-    IN_RUBY_COMMENT   = 0x40,
-    IN_RUBY_STRING    = 0x20      /* single quote */,
-    IN_RUBY_STRING2   = 0x10      /* double quote */,
-    IN_RUBY_STRING3   = 0x08      /* back quote */,
-    IN_RUBY_STRING4   = 0x04      /* %q{...} */,
-    IN_RUBY_REGEX     = 0x02,
-    IN_RUBY_POD       = 0x01,
+static char const crystal_types[] = {
+    "|Bool|Char|Int32|String"
+    "|"
 };
 
 enum {
-    RUBY_STYLE_TEXT =     QE_STYLE_DEFAULT,
-    RUBY_STYLE_COMMENT =  QE_STYLE_COMMENT,
-    RUBY_STYLE_STRING =   QE_STYLE_STRING,
-    RUBY_STYLE_STRING2 =  QE_STYLE_STRING,
-    RUBY_STYLE_STRING3 =  QE_STYLE_STRING,
-    RUBY_STYLE_STRING4 =  QE_STYLE_STRING,
-    RUBY_STYLE_REGEX =    QE_STYLE_STRING_Q,
-    RUBY_STYLE_NUMBER =   QE_STYLE_NUMBER,
-    RUBY_STYLE_KEYWORD =  QE_STYLE_KEYWORD,
-    RUBY_STYLE_TYPE =     QE_STYLE_TYPE,
-    RUBY_STYLE_FUNCTION = QE_STYLE_FUNCTION,
-    RUBY_STYLE_MEMBER =   QE_STYLE_DEFAULT,
-    RUBY_STYLE_HEREDOC =  QE_STYLE_PREPROCESS,
+    IN_CRYSTAL_HEREDOC   = 0x80,
+    IN_CRYSTAL_HD_INDENT = 0x40,
+    IN_CRYSTAL_HD_SIG    = 0x3f,
+    IN_CRYSTAL_COMMENT   = 0x40,
+    IN_CRYSTAL_STRING    = 0x20      /* single quote */,
+    IN_CRYSTAL_STRING2   = 0x10      /* double quote */,
+    IN_CRYSTAL_STRING3   = 0x08      /* back quote */,
+    IN_CRYSTAL_STRING4   = 0x04      /* %q{...} */,
+    IN_CRYSTAL_REGEX     = 0x02,
+    IN_CRYSTAL_POD       = 0x01,
 };
 
-static int ruby_get_name(char *buf, int size, const char32_t *str) {
+enum {
+    CRYSTAL_STYLE_TEXT =     QE_STYLE_DEFAULT,
+    CRYSTAL_STYLE_COMMENT =  QE_STYLE_COMMENT,
+    CRYSTAL_STYLE_STRING =   QE_STYLE_STRING,
+    CRYSTAL_STYLE_STRING2 =  QE_STYLE_STRING,
+    CRYSTAL_STYLE_STRING3 =  QE_STYLE_STRING,
+    CRYSTAL_STYLE_STRING4 =  QE_STYLE_STRING,
+    CRYSTAL_STYLE_REGEX =    QE_STYLE_STRING_Q,
+    CRYSTAL_STYLE_NUMBER =   QE_STYLE_NUMBER,
+    CRYSTAL_STYLE_KEYWORD =  QE_STYLE_KEYWORD,
+    CRYSTAL_STYLE_FUNCTION = QE_STYLE_FUNCTION,
+    CRYSTAL_STYLE_MEMBER =   QE_STYLE_DEFAULT,
+    CRYSTAL_STYLE_HEREDOC =  QE_STYLE_PREPROCESS,
+};
+
+static int crystal_get_name(char *buf, int size, const char32_t *str) {
     int len, i = 0, j;
 
     for (len = 0, j = i; qe_isalnum_(str[j]); j++) {
@@ -91,8 +101,8 @@ static int ruby_get_name(char *buf, int size, const char32_t *str) {
     return j - i;
 }
 
-static void ruby_colorize_line(QEColorizeContext *cp,
-                               char32_t *str, int n, ModeDef *syn)
+static void crystal_colorize_line(QEColorizeContext *cp,
+                                  char32_t *str, int n, ModeDef *syn)
 {
     int i = 0, j, start = i, style = 0, indent, sig;
     char32_t c;
@@ -104,8 +114,8 @@ static void ruby_colorize_line(QEColorizeContext *cp,
     for (indent = 0; qe_isblank(str[indent]); indent++)
         continue;
 
-    if (state & IN_RUBY_HEREDOC) {
-        if (state & IN_RUBY_HD_INDENT) {
+    if (state & IN_CRYSTAL_HEREDOC) {
+        if (state & IN_CRYSTAL_HD_INDENT) {
             while (qe_isblank(str[i]))
                 i++;
         }
@@ -119,38 +129,38 @@ static void ruby_colorize_line(QEColorizeContext *cp,
         for (; qe_isblank(str[i]); i++)
             continue;
         i = n;
-        SET_COLOR(str, start, i, RUBY_STYLE_HEREDOC);
-        if (i > 0 && i == n && (state & IN_RUBY_HD_SIG) == (sig & IN_RUBY_HD_SIG))
-            state &= ~(IN_RUBY_HEREDOC | IN_RUBY_HD_INDENT | IN_RUBY_HD_SIG);
+        SET_COLOR(str, start, i, CRYSTAL_STYLE_HEREDOC);
+        if (i > 0 && i == n && (state & IN_CRYSTAL_HD_SIG) == (sig & IN_CRYSTAL_HD_SIG))
+            state &= ~(IN_CRYSTAL_HEREDOC | IN_CRYSTAL_HD_INDENT | IN_CRYSTAL_HD_SIG);
     } else {
-        if (state & IN_RUBY_COMMENT)
+        if (state & IN_CRYSTAL_COMMENT)
             goto parse_c_comment;
 
-        if (state & IN_RUBY_REGEX)
+        if (state & IN_CRYSTAL_REGEX)
             goto parse_regex;
 
-        if (state & IN_RUBY_STRING)
+        if (state & IN_CRYSTAL_STRING)
             goto parse_string;
 
-        if (state & IN_RUBY_STRING2)
+        if (state & IN_CRYSTAL_STRING2)
             goto parse_string2;
 
-        if (state & IN_RUBY_STRING3)
+        if (state & IN_CRYSTAL_STRING3)
             goto parse_string3;
 
-        if (state & IN_RUBY_STRING4)
+        if (state & IN_CRYSTAL_STRING4)
             goto parse_string4;
 
         if (str[i] == '=' && qe_isalpha(str[i + 1])) {
-            state |= IN_RUBY_POD;
+            state |= IN_CRYSTAL_POD;
         }
-        if (state & IN_RUBY_POD) {
+        if (state & IN_CRYSTAL_POD) {
             if (ustrstart(str + i, "=end", NULL)) {
-                state &= ~IN_RUBY_POD;
+                state &= ~IN_CRYSTAL_POD;
             }
-            style = RUBY_STYLE_COMMENT;
+            style = CRYSTAL_STYLE_COMMENT;
             if (str[i] == '=' && qe_isalpha(str[i + 1]))
-                style = RUBY_STYLE_KEYWORD;
+                style = CRYSTAL_STYLE_KEYWORD;
             i = n;
             SET_COLOR(str, start, i, style);
         }
@@ -170,11 +180,11 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                 /* C comment */
                 i++;
             parse_c_comment:
-                state = IN_RUBY_COMMENT;
+                state = IN_CRYSTAL_COMMENT;
                 for (; i < n; i++) {
                     if (str[i] == '*' && str[i + 1] == '/') {
                         i += 2;
-                        state &= ~IN_RUBY_COMMENT;
+                        state &= ~IN_CRYSTAL_COMMENT;
                         break;
                     }
                 }
@@ -187,7 +197,7 @@ static void ruby_colorize_line(QEColorizeContext *cp,
             &&   (str[i - 2] & CHAR_MASK) != ')')) {
                 /* XXX: should use context to tell regex from divide */
                 /* parse regex */
-                state = IN_RUBY_REGEX;
+                state = IN_CRYSTAL_REGEX;
             parse_regex:
                 while (i < n) {
                     /* XXX: should ignore / inside char classes */
@@ -210,7 +220,7 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                         break;
                     }
                 }
-                style = RUBY_STYLE_REGEX;
+                style = CRYSTAL_STYLE_REGEX;
                 break;
             }
             continue;
@@ -218,7 +228,7 @@ static void ruby_colorize_line(QEColorizeContext *cp,
         case '#':
             i = n;
         comment:
-            style = RUBY_STYLE_COMMENT;
+            style = CRYSTAL_STYLE_COMMENT;
             break;
 
         case '%':
@@ -238,7 +248,7 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                 if (sep == '[') sep = ']';
                 if (sep == '<') sep = '>';
                 /* parse special string const */
-                state = IN_RUBY_STRING4;
+                state = IN_CRYSTAL_STRING4;
             parse_string4:
                 while (i < n) {
                     c = str[i++];
@@ -264,14 +274,14 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                         }
                     }
                 }
-                style = RUBY_STYLE_STRING4;
+                style = CRYSTAL_STYLE_STRING4;
                 break;
             }
             continue;
 
         case '\'':
             /* parse single quoted string const */
-            state = IN_RUBY_STRING;
+            state = IN_CRYSTAL_STRING;
         parse_string:
             while (i < n) {
                 c = str[i++];
@@ -283,12 +293,12 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                     break;
                 }
             }
-            style = RUBY_STYLE_STRING;
+            style = CRYSTAL_STYLE_STRING;
             break;
 
         case '`':
             /* parse single quoted string const */
-            state = IN_RUBY_STRING3;
+            state = IN_CRYSTAL_STRING3;
         parse_string3:
             while (i < n) {
                 c = str[i++];
@@ -305,7 +315,7 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                     break;
                 }
             }
-            style = RUBY_STYLE_STRING3;
+            style = CRYSTAL_STYLE_STRING3;
             break;
 
         case '\"':
@@ -329,13 +339,13 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                 }
             }
             if (c == '\"') {
-                if (state == IN_RUBY_STRING2)
+                if (state == IN_CRYSTAL_STRING2)
                     state = 0;
             } else {
                 if (state == 0)
-                    state = IN_RUBY_STRING2;
+                    state = IN_CRYSTAL_STRING2;
             }
-            style = RUBY_STYLE_STRING2;
+            style = CRYSTAL_STYLE_STRING2;
             break;
 
         case '<':
@@ -378,14 +388,14 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                      * start on the line after the << operator.  This
                      * is a bug due to limited state bits.
                      */
-                    state &= ~(IN_RUBY_HEREDOC | IN_RUBY_HD_INDENT | IN_RUBY_HD_SIG);
-                    state |= IN_RUBY_HEREDOC;
+                    state &= ~(IN_CRYSTAL_HEREDOC | IN_CRYSTAL_HD_INDENT | IN_CRYSTAL_HD_SIG);
+                    state |= IN_CRYSTAL_HEREDOC;
                     if (str[i + 1] == '-') {
-                        state |= IN_RUBY_HD_INDENT;
+                        state |= IN_CRYSTAL_HD_INDENT;
                     }
-                    state |= (sig & IN_RUBY_HD_SIG);
+                    state |= (sig & IN_CRYSTAL_HD_SIG);
                     i = j;
-                    style = RUBY_STYLE_HEREDOC;
+                    style = CRYSTAL_STYLE_HEREDOC;
                     break;
                 }
             }
@@ -409,12 +419,12 @@ static void ruby_colorize_line(QEColorizeContext *cp,
             continue;
 
         case ':':
-            /* XXX: should parse Ruby symbol */
+            /* XXX: should parse Crystal symbol */
             continue;
 
         case '@':
-            i += ruby_get_name(kbuf, countof(kbuf), str + i);
-            style = RUBY_STYLE_MEMBER;
+            i += crystal_get_name(kbuf, countof(kbuf), str + i);
+            style = CRYSTAL_STYLE_MEMBER;
             break;
 
         default:
@@ -459,25 +469,21 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                     }
                 }
                 /* XXX: should detect malformed number constants */
-                style = RUBY_STYLE_NUMBER;
+                style = CRYSTAL_STYLE_NUMBER;
                 break;
             }
             if (qe_isalpha_(c)) {
                 i--;
-                i += ruby_get_name(kbuf, countof(kbuf), str + i);
+                i += crystal_get_name(kbuf, countof(kbuf), str + i);
 
                 if (strfind(syn->keywords, kbuf)) {
-                    style = RUBY_STYLE_KEYWORD;
-                    break;
-                }
-                if (strfind(syn->types, kbuf)) {
-                    style = RUBY_STYLE_TYPE;
+                    style = CRYSTAL_STYLE_KEYWORD;
                     break;
                 }
                 if (qe_isblank(str[i]))
                     i++;
                 if (str[i] == '(' || str[i] == '{') {
-                    style = RUBY_STYLE_FUNCTION;
+                    style = CRYSTAL_STYLE_FUNCTION;
                     break;
                 }
                 continue;
@@ -492,30 +498,19 @@ static void ruby_colorize_line(QEColorizeContext *cp,
     cp->colorize_state = state;
 }
 
-static int ruby_mode_probe(ModeDef *mode, ModeProbeData *p)
-{
-    if (match_extension(p->filename, mode->extensions)
-    ||  match_shell_handler(cs8(p->buf), mode->shell_handlers)
-    ||  stristart(p->filename, "Rakefile", NULL)) {
-        return 80;
-    }
-    return 1;
-}
-
-static ModeDef ruby_mode = {
-    .name = "Ruby",
-    .extensions = "rb|gemspec",
-    .shell_handlers = "ruby",
-    .mode_probe = ruby_mode_probe,
-    .keywords = ruby_keywords,
-    .colorize_func = ruby_colorize_line,
+static ModeDef crystal_mode = {
+    .name = "Crystal",
+    .extensions = "cr",
+    .shell_handlers = "crystal",
+    .keywords = crystal_keywords,
+    .types = crystal_types,
+    .colorize_func = crystal_colorize_line,
 };
 
-static int ruby_init(void)
+static int crystal_init(void)
 {
-    qe_register_mode(&ruby_mode, MODEF_SYNTAX);
-
+    qe_register_mode(&crystal_mode, MODEF_SYNTAX);
     return 0;
 }
 
-qe_module_init(ruby_init);
+qe_module_init(crystal_init);

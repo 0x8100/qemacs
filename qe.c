@@ -2,7 +2,7 @@
  * QEmacs, tiny but powerful multimode editor
  *
  * Copyright (c) 2000-2002 Fabrice Bellard.
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -89,6 +89,7 @@ ModeDef *qe_find_mode(const char *name, int flags)
     QEmacsState *qs = &qe_state;
     ModeDef *m;
 
+    strstart(name, "lang-", &name);
     for (m = qs->first_mode; m; m = m->next) {
         if ((m->flags & flags) == flags) {
             if ((m->name && !strcasecmp(m->name, name))
@@ -106,6 +107,7 @@ ModeDef *qe_find_mode_filename(const char *filename, int flags)
     ModeDef *m;
 
     for (m = qs->first_mode; m; m = m->next) {
+        // XXX: should have a filenames field to match basenames
         if ((m->flags & flags) == flags
         &&  match_extension(filename, m->extensions)) {
             break;
@@ -309,7 +311,7 @@ static CompletionDef command_completion = {
 
 /* key binding handling */
 
-static int qe_register_binding(ModeDef *m, const CmdDef *d, unsigned int *keys, int nb_keys)
+static int qe_register_binding(ModeDef *m, const CmdDef *d, const unsigned int *keys, int nb_keys)
 {
     QEmacsState *qs = &qe_state;
     KeyDef **lp, *p;
@@ -2832,20 +2834,20 @@ void do_goto(EditState *s, const char *str, int unit)
     switch (*p) {
     case 'g':
         pos *= 1000;
-        /* fall thru */
+        fallthrough;
     case 'm':
         pos *= 1000;
-        /* fall thru */
+        fallthrough;
     case 'k':
         pos *= 1000;
         p++;
         break;
     case 'G':
         pos *= 1024;
-        /* fall thru */
+        fallthrough;
     case 'M':
         pos *= 1024;
-        /* fall thru */
+        fallthrough;
     case 'K':
         pos *= 1024;
         p++;
@@ -4382,6 +4384,8 @@ static int get_staticly_colorized_line(EditState *s, char32_t *buf, int buf_size
 
 #define COLORIZED_LINE_PREALLOC_SIZE 64
 
+// XXX: s->colorize_xxx fields should be mode data, potentially shared by
+//      multiple EditState upon splitting windows
 static int syntax_get_colorized_line(EditState *s,
                                      char32_t *buf, int buf_size,
                                      QETermStyle *sbuf,

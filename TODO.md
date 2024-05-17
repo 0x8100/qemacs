@@ -2,7 +2,7 @@
 
 # QEmacs TODO list
 
-## Documentation
+## Documentation / Support
 
 * improve **README.md**
 * rework documentation:
@@ -20,6 +20,7 @@
 * add command documentation in `describe-variable`
 * show memory stats in `describe-buffer` and `about-qemacs`
 * add function to add entry in **TODO.md**
+* move mailing list to github or private server
 
 ## Core / Buffer / Input
 
@@ -65,7 +66,10 @@
 * `previous-buffer` command on C-x C-left
 * `save-some-buffers` command on C-x s
 * standardize key prefixes: C-, M-, S- and possibly others
+* use C-M- prefix instead of M-C- in source and documentation but support
+both in `strtokey`
 * redefine `KEY_Fx` to make them sequential
+* rationalize KEY_xxx definitions and modifier bits to support all combinations
 * add registrable escape sequences and key names
   ex: S-f5 = ^[[15;2~
 * add registrable key translations for NON ASCII input
@@ -101,7 +105,7 @@
   cp="200F" na="RIGHT-TO-LEFT MARK" alias="RLM"
 * `set_input_method()` and `set_buffer_file_coding_system()` in config file.
 * test Hebrew keymap support.
-* rewrite fribidi
+* rewrite bidirectional algorithm and support
 * use Unicode file hierarchy for code page files
 * handle or remove extra code page files:
   CP1006.TXT CP1253.TXT CP1254.TXT CP1255.TXT CP1258.TXT
@@ -428,6 +432,8 @@ insert_window_left()  deletes some left-most windows
   * `d-mode`
   * `java-mode`
   * `javascript-mode`, `js-mode` -> javascript files
+    * support for v8 natives syntax %ddd()
+    * handle missing semicolons
   * `json-mode`
   * `scala-mode`
   * `yacc-mode`
@@ -438,6 +444,7 @@ insert_window_left()  deletes some left-most windows
   * `vala-mode`
   * `cuda-mode`
 * `electric-c-mode`
+* parenthesis matching problems in comments and markdown and other modes
 
 ### Markdown modes
 
@@ -466,6 +473,7 @@ insert_window_left()  deletes some left-most windows
 * `C-x RET RET` should switch to last process buffer selected and move to the end of buffer
 * `C-x RET RET` should find another shell buffer if `*shell*` has been killed. Should enumerate all buffers.
 * terminal emulation: when move inserts spaces, they should have default attributes:  add test cases
+* terminal emulation: improve behavior based on Wikipedia page [ANSI_escape_code](https://en.wikipedia.org/wiki/ANSI_escape_code)
 * `C-c C-c` should abort make process and other shell buffers
 * support `:` as alternate escape sequence argument separator
 * `start-shell` should kill popup window
@@ -721,6 +729,33 @@ insert_window_left()  deletes some left-most windows
 
 ### New modes
 
+## `csv-mode`
+
+* CSV database functions
+  - `csv_find(string where)`
+  - `csv_select(string field_list, string where, string destination)`
+  - `csv_filter(string where)`
+  - `csv_update(string what_list, string where)`
+  - `csv_append_columns(string field_list)`
+  - `csv_insert_columns(string field_list)`
+  - `csv_delete_columns(string field_list)`
+  - `csv_delete_lines(string where)`
+  - `csv_append_lines(string field_list)`
+  - `csv_insert_lines(string field_list)`
+  - `csv_sort(string field_list)`
+
+## `json-mode`
+
+* auto-wrap and indent
+* JSON database functions
+
+## `xml-mode`
+
+* auto-wrap and indent
+* XML database functions
+
+## Other modes
+
 * `rst-mode`: support ReStructuredText (RST)
 * `auto-compression-mode`
 * minor modes with key override such as "preview" mode
@@ -736,3 +771,8 @@ insert_window_left()  deletes some left-most windows
 * abbreviation mode
 * ispell / spell checker
 * printing support
+
+## Fly zone
+
+* kill eval result so it can be yanked where appropriate
+* integrate qscript

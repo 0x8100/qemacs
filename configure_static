@@ -1,1 +1,7 @@
-sh ./configure --extra-ldflags="-static"
+#sh ./configure --extra-ldflags="-static"
+
+#   get musl.cc toolchain from https://musl.cc/x86_64-linux-musl-native.tgz
+# and put it to $HOME/work/
+sh ./configure --extra-ldflags="-static" \
+ --cc=$HOME/work/x86_64-linux-musl-native/bin/gcc \
+ --host-cc=$HOME/work/x86_64-linux-musl-native/bin/gcc

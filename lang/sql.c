@@ -1,7 +1,7 @@
 /*
  * SQL language mode for QEmacs.
  *
- * Copyright (c) 2000-2024 Charlie Gordon.
+ * Copyright (c) 2000-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -196,7 +196,7 @@ static int sql_mode_probe(ModeDef *mode, ModeProbeData *pd)
     return 1;
 }
 
-static ModeDef sql_mode = {
+ModeDef sql_mode = {
     .name = "SQL",
     .extensions = "sql|Sql|mysql|sqlite|sqlplus|rdb|xdb|db",
     .mode_probe = sql_mode_probe,

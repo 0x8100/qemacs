@@ -2,7 +2,7 @@
  * Buffer handling for QEmacs
  *
  * Copyright (c) 2000-2002 Fabrice Bellard.
- * Copyright (c) 2002-2024 Charlie Gordon.
+ * Copyright (c) 2002-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -857,7 +857,10 @@ void eb_free(EditBuffer **bp)
         eb_free_style_buffer(b);
 
         qe_free(&b->saved_data);
-        qe_free(bp);
+        // XXX: cannot use qe_free(bp) because *bp may have been set to NULL
+        //      already, eg: eb_free_log_buffer() and eb_free_style_buffer()
+        qe_free(&b);
+        *bp = NULL;
     }
 }
 

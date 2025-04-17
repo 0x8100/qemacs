@@ -2,7 +2,7 @@
  * QEmacs, tiny but powerful multimode editor
  *
  * Copyright (c) 2000-2002 Fabrice Bellard.
- * Copyright (c) 2000-2024 Charlie Gordon.
+ * Copyright (c) 2000-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -7727,7 +7727,6 @@ static void do_minibuffer_electric_key(EditState *s, int key, int argval) {
     MinibufState *mb = minibuffer_get_state(s, 0);
 
     /* erase beginning of line if typing / or ~ in certain places */
-    // XXX: behavior on yank should be customized too
     if (mb && mb->completion && (mb->completion->flags & CF_FILENAME)
     &&  ((c = eb_nextc(s->b, 0, &offset)) == '/' || c == '~')) {
         stop = s->offset;
@@ -7743,6 +7742,32 @@ static void do_minibuffer_electric_key(EditState *s, int key, int argval) {
         }
     }
     do_char(s, key, argval);
+}
+
+static void do_minibuffer_electric_yank(EditState *s) {
+    MinibufState *mb = minibuffer_get_state(s, 0);
+    int stop = s->b->total_size;
+    int offset;
+    char32_t c;
+
+    do_yank(s);
+
+    /* erase beginning of line if yanking absolute path after / */
+    if (mb && mb->completion && (mb->completion->flags & CF_FILENAME)
+    &&  ((c = eb_nextc(s->b, 0, &offset)) == '/' || c == '~')) {
+        c = eb_prevc(s->b, stop, &offset);
+        if (c == '/') {
+            /* check for absolute path */
+            if (eb_match_char32(s->b, stop, '/', NULL)
+            ||  eb_match_char32(s->b, stop, '~', NULL)
+            ||  eb_match_str_utf8(s->b, stop, "http://", NULL)
+            ||  eb_match_str_utf8(s->b, stop, "https://", NULL)
+            ||  eb_match_str_utf8(s->b, stop, "ftp://", NULL)) {
+                eb_delete(s->b, 0, stop);
+            }
+        }
+    }
+    s->qs->this_cmd_func = (CmdFunc)do_yank;
 }
 
 /* space does completion only if a completion method is defined */
@@ -7838,6 +7863,17 @@ StringArray *qe_get_history(QEmacsState *qs, const char *name) {
     qs->first_history = p;
     return &p->history;
 }
+
+#ifndef CONFIG_TINY
+static void qe_free_history_list(QEmacsState *qs) {
+    HistoryEntry *p;
+    while ((p = qs->first_history) != NULL) {
+        qs->first_history = p->next;
+        free_strings(&p->history);
+        qe_free(&p);
+    }
+}
+#endif
 
 void do_minibuffer_history(EditState *s, int n)
 {
@@ -8101,6 +8137,9 @@ static const CmdDef minibuffer_commands[] = {
           "Insert a character into the minibuffer with side effects",
           do_minibuffer_electric_key, ESii,
           "*" "k" "p")
+    CMD2( "minibuffer-electric-yank", "C-y",
+          "Yank from kill buffer with side effects",
+          do_minibuffer_electric_yank, ES, "*")
     /* commands used to configure search flags */
     CMD0( "minibuffer-toggle-case-fold", "M-c, C-c",
           "toggle search case-sensitivity",
@@ -9295,9 +9334,9 @@ static void quit_examine_buffers(QuitState *is)
         if (use_session_file)
             do_save_session(qs->active_window, 0);
 #endif
-        qe_free(&is);
         url_exit();
     }
+    qe_free(&is);
 }
 
 static void quit_key(void *opaque, int ch)
@@ -10767,7 +10806,7 @@ void qe_register_cmd_line_options(QEmacsState *qs, CmdLineOptionDef *table)
 
 const char str_version[] = "QEmacs version " QE_VERSION;
 const char str_credits[] = "Copyright (c) 2000-2003 Fabrice Bellard\n"
-                           "Copyright (c) 2000-2024 Charlie Gordon\n";
+                           "Copyright (c) 2000-2025 Charlie Gordon\n";
 
 static void show_version(void)
 {
@@ -11633,7 +11672,7 @@ static void qe_load_all_modules(QEmacsState *qs)
     char filename[MAX_FILENAME_SIZE];
     void *h;
     void *sym;
-    int (*init_func)(void);
+    int (*init_func)(QEmacsState *);
 
     ec = qs->ec;
     qs->ec.function = "load-all-modules";
@@ -11677,7 +11716,7 @@ static void qe_load_all_modules(QEmacsState *qs)
         }
 
         /* all is OK: we can init the module now */
-        (*init_func)();
+        (*init_func)(qs);
     }
     find_file_close(&ffst);
 
@@ -11988,6 +12027,7 @@ int main(int argc, char **argv)
         qs->buffer_cache_size = qs->buffer_cache_len = 0;
         qe_clear_macro(qs);
         qe_free(&qs->macro_format);
+        qe_free_history_list(qs);
     }
 #endif
     return status;

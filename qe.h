@@ -2,7 +2,7 @@
  * QEmacs, tiny but powerful multimode editor
  *
  * Copyright (c) 2000-2001 Fabrice Bellard.
- * Copyright (c) 2000-2024 Charlie Gordon.
+ * Copyright (c) 2000-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -646,10 +646,10 @@ void eb_delete_properties(EditBuffer *b, int offset, int offset2);
 /* dynamic module case */
 
 #define qe_module_init(fn) \
-        int qe__module_init(QEmacsState *qs) { return fn(qs); }
+        int __qe_module_init(QEmacsState *qs) { return fn(qs); }
 
 #define qe_module_exit(fn) \
-        void qe__module_exit(QEmacsState *qs) { fn(qs); }
+        void __qe_module_exit(QEmacsState *qs) { fn(qs); }
 
 #else /* QE_MODULE */
 
@@ -1908,6 +1908,10 @@ extern int is_player;
 
 /* flags from libqhtml/css.h */
 int gxml_mode_init(EditBuffer *b, int flags, const char *default_stylesheet);
+
+/* lang/sql.c */
+
+extern ModeDef sql_mode;   /* used in tcl_mode */
 
 /* image.c */
 

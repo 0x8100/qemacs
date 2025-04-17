@@ -2,7 +2,7 @@
  * X11 handling for QEmacs
  *
  * Copyright (c) 2000-2003 Fabrice Bellard.
- * Copyright (c) 2002-2024 Charlie Gordon.
+ * Copyright (c) 2002-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -46,6 +46,10 @@
 #include <X11/extensions/Xvlib.h>
 #endif
 
+
+#define _NET_WM_STATE_REMOVE 0L
+#define _NET_WM_STATE_ADD    1L
+
 //#define CONFIG_DOUBLE_BUFFER  1
 
 /* NOTE: XFT code is currently broken */
@@ -61,6 +65,7 @@ typedef struct X11State {
     QEmacsState *qs;
     Display *display;
     int xscreen;
+    Window root;
     Window window;
     Atom wm_delete_window;
     GC gc, gc_pixmap;
@@ -223,6 +228,7 @@ static int x11_dpy_init(QEditScreen *s, QEmacsState *qs, int w, int h)
         return -1;
     }
     xs->xscreen = DefaultScreen(xs->display);
+    xs->root = DefaultRootWindow(xs->display);
 
     bg = BlackPixel(xs->display, xs->xscreen);
     fg = WhitePixel(xs->display, xs->xscreen);
@@ -325,6 +331,7 @@ static int x11_dpy_init(QEditScreen *s, QEmacsState *qs, int w, int h)
         if (vinfo) {
             xs->visual_depth = vinfo->depth;
         }
+        XFree(vinfo);
     }
 
     xs->xim = XOpenIM(xs->display, NULL, NULL, NULL);
@@ -448,15 +455,31 @@ static void xv_init(QEditScreen *s)
         s->video_format = QEBITMAP_FORMAT_YUV420P;
     }
 }
+
+static void xv_close(QEditScreen *s)
+{
+    X11State *xs = s->priv_data;
+
+    XFree(xs->xv_fo);
+    XvFreeAdaptorInfo(xs->xv_ai);
+}
 #endif
 
 static void x11_dpy_close(QEditScreen *s)
 {
     X11State *xs = s->priv_data;
 
+#ifdef CONFIG_XV
+    xv_close(s);
+#endif
+
 #ifdef CONFIG_DOUBLE_BUFFER
     XFreePixmap(xs->display, xs->dbuffer);
 #endif
+
+    XFreeGC(xs->display, xs->gc_pixmap);
+    XFreeGC(xs->display, xs->gc);
+
     XCloseDisplay(xs->display);
     qe_free(&s->priv_data);
 }
@@ -1074,27 +1097,38 @@ static void x11_dpy_flush(QEditScreen *s)
 static void x11_dpy_full_screen(QEditScreen *s, int full_screen)
 {
     X11State *xs = s->priv_data;
-    XWindowAttributes attr1;
-    Window win;
+    Atom wm_state;
+    Atom wm_state_fullscreen;
+    XEvent event;
+    XWindowAttributes attribs;
 
-    XGetWindowAttributes(xs->display, xs->window, &attr1);
-    if (full_screen) {
-        if (attr1.width != xs->screen_width || attr1.height != xs->screen_height) {
-            /* store current window position and size */
-            XTranslateCoordinates(xs->display, xs->window, attr1.root, 0, 0,
-                                  &xs->last_window_x, &xs->last_window_y, &win);
-            xs->last_window_width = attr1.width;
-            xs->last_window_height = attr1.height;
-            XMoveResizeWindow(xs->display, xs->window,
-                              0, 0, xs->screen_width, xs->screen_height);
-        }
-    } else {
-        if (xs->last_window_width) {
-            XMoveResizeWindow(xs->display, xs->window,
-                              xs->last_window_x, xs->last_window_y,
-                              xs->last_window_width, xs->last_window_height);
-        }
-    }
+    wm_state = XInternAtom(xs->display, "_NET_WM_STATE", False);
+    wm_state_fullscreen = XInternAtom(xs->display, "_NET_WM_STATE_FULLSCREEN", False);
+
+    memset(&event, 0, sizeof(event));
+    event.type = ClientMessage;
+    event.xclient.window = xs->window;
+    event.xclient.format = 32;
+    event.xclient.message_type = wm_state;
+    event.xclient.data.l[0] = full_screen ? _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE;
+    event.xclient.data.l[1] = wm_state_fullscreen;
+    event.xclient.data.l[2] = 0;
+    event.xclient.data.l[3] = 1;
+    event.xclient.data.l[4] = 0;
+
+    XSendEvent(xs->display, xs->root, False,
+               SubstructureNotifyMask | SubstructureRedirectMask,
+               &event);
+
+    XFlush(xs->display);
+
+    /*
+      last_window_width, last_window_height, last_window_x, last_window_y
+      not need since window manager doing geometric.
+    */
+    XGetWindowAttributes(xs->display, xs->window, &attribs);
+    xs->screen_width = attribs.width;
+    xs->screen_height = attribs.height;
 }
 
 static void x11_dpy_selection_activate(QEditScreen *s)
@@ -1354,6 +1388,9 @@ static void x11_handle_event(void *opaque)
         case ConfigureNotify:
             if (x11_term_resize(s, xev.xconfigure.width, xev.xconfigure.height)) {
                 qe_expose_set(s, rgn, 0, 0, s->width, s->height);
+                /* FIXME: fullscreen may be set via window managers,
+                 * record it to qs->is_full_screen the right way.
+                 */
             }
             break;
 

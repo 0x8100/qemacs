@@ -1,7 +1,7 @@
 # QEmacs, tiny but powerful multimode editor
 #
 # Copyright (c) 2000-2002 Fabrice Bellard.
-# Copyright (c) 2000-2024 Charlie Gordon.
+# Copyright (c) 2000-2025 Charlie Gordon.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -119,12 +119,13 @@ endif
 
 TARGETLIBS:=
 
+TOP:=0
 ifeq (,$(TARGET))
 TARGET:=qe
 TARGETS:=kmaps ligatures tqe qe-manual.md
+ifeq (,$(DEBUG_SUFFIX))
 TOP:=1
-else
-TOP:=0
+endif
 endif
 ifeq (,$(TARGET_OBJ))
 TARGET_OBJ:=$(TARGET)
@@ -212,7 +213,8 @@ OBJS+= modes/unihex.o   modes/bufed.o    modes/orgmode.o  modes/markdown.o \
        lang/scad.o      lang/magpie.o    lang/falcon.o    lang/wolfram.o   \
        lang/tiger.o     lang/asm.o       lang/inifile.o   lang/postscript.o \
        lang/sharp.o     lang/emf.o       lang/csv.o       lang/crystal.o   \
-       lang/rye.o       lang/nanorc.o    modes/fractal.o  $(EXTRA_MODES)
+       lang/rye.o       lang/nanorc.o    lang/tcl.o       modes/fractal.o  \
+       $(EXTRA_MODES)
 ifndef CONFIG_WIN32
 OBJS+= modes/shell.o    modes/dired.o    modes/archive.o  modes/latex-mode.o
 endif

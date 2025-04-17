@@ -2,7 +2,7 @@
  * CSS core for qemacs.
  *
  * Copyright (c) 2000-2002 Fabrice Bellard.
- * Copyright (c) 2007-2024 Charlie Gordon.
+ * Copyright (c) 2007-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -374,6 +374,17 @@ static void css_init_idents(void)
     }
 }
 
+static void css_free_idents(void)
+{
+    int i;
+
+    for (i = 0; i < table_ident_nb; i++)
+        qe_free(&table_ident[i]);
+    qe_free(&table_ident);
+    table_ident_nb = table_ident_allocated = 0;
+    memset(hash_ident, 0, sizeof(hash_ident));
+}
+
 /****************************************************/
 
 /* set a counter in the current element to value "value". If not
@@ -522,12 +533,9 @@ static inline int attribute_match(CSSStyleSheetAttributeEntry *e,
     CSSIdent attr;
     int op;
 
-    /* no match possible if no attribute */
-    if (!a)
-        return 0;
     attr = e->attr;
     op = e->op;
-    do {
+    for (; a != NULL; a = a->next) {
         if (attr == a->attr) {
             switch (op) {
             case CSS_ATTR_OP_SET:
@@ -543,16 +551,14 @@ static inline int attribute_match(CSSStyleSheetAttributeEntry *e,
                 break;
             }
         }
-        a = a->next;
-    } while (a != NULL);
+    }
     return 0;
 }
 
 /* return true if (box,pelement) matches simple selector ss (may
    recurse) */
 /* XXX: exclude anonymous boxes */
-static int selector_match(CSSSimpleSelector *ss,
-                          CSSBox *box)
+static int selector_match(CSSSimpleSelector *ss, CSSBox *box)
 {
     CSSStyleSheetAttributeEntry *ae;
     CSSBox *box1, *lbox;
@@ -4608,4 +4614,9 @@ void css_delete_document(CSSContext **sp)
 void css_init(void)
 {
     css_init_idents();
+}
+
+void css_exit(void)
+{
+    css_free_idents();
 }

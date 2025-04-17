@@ -1,4 +1,4 @@
-<!-- TODO list for qemacs -- Author: Charlie Gordon -- Updated: 2024-07-27 -->
+<!-- TODO list for qemacs -- Author: Charlie Gordon -- Updated: 2025-02-10 -->
 
 # QEmacs TODO list
 
@@ -7,7 +7,7 @@
 * should `mark` be a window variable instead of a buffer variable?
 * should `tab-width` be a window variable instead of or in addition to a buffer variable?
 * extra modes for drujensen/fib repo:
-    es(escript), janet, k(K), p6, pony, ps1, pyx(cython), raku(rakudo), tcl, vb, zig
+    es(escript), janet, k(K), p6, pony, ps1, pyx(cython), raku(rakudo), vb, zig
     detect flavors: ldc2?, bash, powershell, pypy, qb64, guile, sbcl
 * drag out of window should generate **autorepeat** scrolling requests
 * prevent mouse focus to window if searching
@@ -44,7 +44,6 @@
 * auto-complete previously used commands when no other context is available
 * handle paste bracketting in xterm: `ESC [ 2 0 0 ~ xxx ESC [ 2 0 1 ~`
 * display images using iTerm's image transfert protocol
-* add `show-styles` and `show-colors`
 * evaluate colors in expressions: `rgb(r,g,b)`, `hsl(h,s,l)`, `hsv(h,s,v)`
 * do not abort macro on incremental search failure, just on final failure upon RET
 * `show-date-and-time` should distinguish between `C-u` and explicit number prefix
@@ -61,7 +60,6 @@
   - alternative: keep previous window if changing the buffer so swapping back restores the position and mode
   - add a previous window for `predict_switch_to_buffer`
 * `-color_code` command line option to display available colors on terminal
-* `show-colors` display colors in a popup buffer with samples
 * automatic remote config fetch based on email at qemacs.org:
   - .qemacs, .bashrc...
 * shell buffer remote filesystem using commands `get` and `put` (for ssh sessions)
@@ -481,7 +479,6 @@ insert_window_left()  deletes some left-most windows
 * basic: fix fuzzy completion when single unanchored match
 * completion: minibuffer completion: bad return on `C-x C-f . SPC qe SPC RET`
 * minibuf: use more mode specific bindings
-* minibuf: `minibuffer-electric-yank` in minibuffer to fix pathname
 * basic: completion in `load-resource-file`
 * completion: abbreviate lines in file completion list popup
 * open file with fuzzy completion
@@ -973,7 +970,6 @@ insert_window_left()  deletes some left-most windows
   * `sparql-mode`
   * `systemverilog-mode`
   * `t2t-mode`
-  * `tcl-mode`: Tcl files.
   * `texinfo-mode`
   * `vbnet-mode`
   * `verilog-mode`

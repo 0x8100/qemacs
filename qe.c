@@ -11197,10 +11197,16 @@ static const CmdDef basic_commands[] = {
     CMD2( "kill-line", "C-k",
           "Kill to the end of line",
           do_kill_line, ESi, "P")
-    CMD2( "kill-whole-line", "M-k", // should be C-S-Backspace
+    CMD2( "kill-whole-line", "", // should be C-S-Backspace
           "Kill the line at point",
           do_kill_whole_line, ESi, "p")
-    CMD2( "kill-beginning-of-line", "",
+    CMD2( "copy-whole-line", "",
+          "Copy the line at point",
+          do_copy_whole_line, ESi, "p")
+    CMD2( "duplicate-line", "M-k",
+          "Duplicate the line at point",
+          do_duplicate_line, ESi, "p")
+    CMD2( "kill-beginning-of-line", "M-k",
           "Kill to the beginning of the line",
           do_kill_beginning_of_line, ESi, "P")
     CMD2( "backward-kill-word", "M-DEL, M-C-h",
@@ -11418,6 +11424,12 @@ static const CmdDef basic_commands[] = {
     CMD0( "other-window", "C-x o",
           "Move the focus to another window",
           do_other_window)
+    CMD0( "other-window", "C-x SPC",
+          "Move the focus to another window",
+          do_other_window)
+    CMD0( "other-window", "C-x C-SPC",
+          "Move the focus to another window",
+          do_other_window)
     CMD0( "next-window", "C-x n",
           "Move the focus to the next window",
           do_other_window)
@@ -11471,6 +11483,12 @@ static const CmdDef basic_commands[] = {
     CMD3( "split-window-vertically", "C-x 2",
           "Split the current window top and bottom",
           do_split_window, ESii, "P" "v", SW_STACKED)
+    CMD3( "split-window-vertically", "C-x -",
+          "Split the current window top and bottom",
+          do_split_window, ESii, "P" "v", SW_STACKED)
+    CMD3( "split-window-horizontally", "C-x VB",
+          "Split the current window side by side",
+          do_split_window, ESii, "P" "v", SW_SIDE_BY_SIDE)
     CMD3( "split-window-horizontally", "C-x 3",
           "Split the current window side by side",
           do_split_window, ESii, "P" "v", SW_SIDE_BY_SIDE)

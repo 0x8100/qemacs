@@ -44,7 +44,8 @@ enum {
  * than one line (eg, multi-line functions and strings)
  */
 static void latex_colorize_line(QEColorizeContext *cp,
-                                char32_t *str, int n, ModeDef *syn)
+                                const char32_t *str, int n,
+                                QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start;
     char32_t c;
@@ -73,7 +74,7 @@ static void latex_colorize_line(QEColorizeContext *cp,
                         break;
                     }
                 }
-                SET_COLOR(str, start, i, LATEX_STYLE_STRING);
+                SET_STYLE(sbuf, start, i, LATEX_STYLE_STRING);
             }
             break;
         case '@':
@@ -81,7 +82,7 @@ static void latex_colorize_line(QEColorizeContext *cp,
                 break;
             if (str[i] == 'c' && !qe_isalnum_(str[i + 1])) {
                 i = n;
-                SET_COLOR(str, start, i, LATEX_STYLE_COMMENT);
+                SET_STYLE(sbuf, start, i, LATEX_STYLE_COMMENT);
                 break;
             }
             fallthrough;
@@ -97,17 +98,15 @@ static void latex_colorize_line(QEColorizeContext *cp,
                     i++;
                 }
             }
-            SET_COLOR(str, start, i, LATEX_STYLE_FUNCTION);
-            while (qe_isblank(str[i])) {
-                i++;
-            }
+            SET_STYLE(sbuf, start, i, LATEX_STYLE_FUNCTION);
+            i = cp_skip_blanks(str, i, n);
             while (str[i] == '{' || str[i] == '[') {
                 if (str[i++] == '[') {
                     /* handle [keyword] */
                     start = i;
                     while (str[i] != '\0' && str[i] != ']')
                         i++;
-                    SET_COLOR(str, start, i, LATEX_STYLE_KEYWORD);
+                    SET_STYLE(sbuf, start, i, LATEX_STYLE_KEYWORD);
                     if (str[i] == ']')
                         i++;
                 } else {
@@ -124,13 +123,11 @@ static void latex_colorize_line(QEColorizeContext *cp,
                         }
                         i++;
                     }
-                    SET_COLOR(str, start, i, LATEX_STYLE_VARIABLE);
+                    SET_STYLE(sbuf, start, i, LATEX_STYLE_VARIABLE);
                     if (str[i] == '}')
                         i++;
                 }
-                while (qe_isblank(str[i])) {
-                    i++;
-                }
+                i = cp_skip_blanks(str, i, n);
             }
             break;
         case '%':
@@ -138,7 +135,7 @@ static void latex_colorize_line(QEColorizeContext *cp,
                 break;
             /* line comment */
             i = n;
-            SET_COLOR(str, start, i, LATEX_STYLE_COMMENT);
+            SET_STYLE(sbuf, start, i, LATEX_STYLE_COMMENT);
             break;
         default:
             break;
@@ -244,32 +241,26 @@ static void latex_cmd_run(void *opaque, char *cmd,
     struct latex_function *func = (struct latex_function *)opaque;
     char dir[MAX_FILENAME_SIZE];
     const char *path = NULL;
+    EditState *s = func->es;
+    QEmacsState *qs = s->qs;
 
     if (cmd == NULL) {
-        put_status(func->es, "Aborted");
+        put_error(s, "Aborted");
         return;
     }
 
     /* get the directory of the open file and change into it */
-    if (func->es->b) {
-        path = get_default_path(func->es->b, func->es->b->total_size,
-                                dir, sizeof dir);
-    }
+    path = get_default_path(s->b, s->b->total_size, dir, sizeof dir);
 
     if (func->output_to_buffer) {
-        /* if the buffer already exists, kill it */
-        EditBuffer *b = eb_find("*LaTeX output*");
-        if (b) {
-            /* XXX: e should not become invalid */
-            qe_kill_buffer(b);
-        }
-
-        /* create new buffer */
-        b = new_shell_buffer(NULL, NULL, "*LaTeX output*", NULL, path, cmd,
-                             SF_COLOR | SF_INFINITE);
+        EditBuffer *b;
+        /* invoke command in shell buffer */
+        b = qe_new_shell_buffer(qs, NULL, s, "*LaTeX output*", NULL,
+                                path, cmd, SF_COLOR | SF_INFINITE |
+                                SF_REUSE_BUFFER | SF_ERASE_BUFFER);
         if (b) {
             /* XXX: try to split window if necessary */
-            switch_to_buffer(func->es, b);
+            switch_to_buffer(s, b);
         }
     } else {
         int pid = fork();
@@ -322,7 +313,7 @@ static void do_latex(EditState *e, const char *cmd)
             latex_cmd_run(func, buf, NULL);
         }
     } else {
-        put_status(e, "%s: No match", buf);
+        put_error(e, "%s: No match", buf);
     }
 }
 
@@ -353,15 +344,16 @@ static ModeDef texinfo_mode = {
 };
 
 static CompletionDef latex_completion = {
-    "latex", latex_complete,
+    .name = "latex",
+    .enumerate = latex_complete,
 };
 
-static int latex_init(void)
+static int latex_init(QEmacsState *qs)
 {
-    qe_register_mode(&latex_mode, MODEF_SYNTAX);
-    qe_register_mode(&texinfo_mode, MODEF_SYNTAX);
-    qe_register_commands(&latex_mode, latex_commands, countof(latex_commands));
-    qe_register_completion(&latex_completion);
+    qe_register_mode(qs, &latex_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &texinfo_mode, MODEF_SYNTAX);
+    qe_register_commands(qs, &latex_mode, latex_commands, countof(latex_commands));
+    qe_register_completion(qs, &latex_completion);
 
     return 0;
 }

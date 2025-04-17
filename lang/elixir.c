@@ -1,7 +1,7 @@
 /*
  * Elixir language mode for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -63,7 +63,8 @@ enum {
 };
 
 static void elixir_colorize_line(QEColorizeContext *cp,
-                                 char32_t *str, int n, ModeDef *syn)
+                                 const char32_t *str, int n,
+                                 QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start = i, style = 0, klen, nc, has_under;
     char32_t c, sep;
@@ -276,7 +277,7 @@ static void elixir_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -291,10 +292,9 @@ static ModeDef elixir_mode = {
     .colorize_func = elixir_colorize_line,
 };
 
-static int elixir_init(void)
+static int elixir_init(QEmacsState *qs)
 {
-    qe_register_mode(&elixir_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &elixir_mode, MODEF_SYNTAX);
     return 0;
 }
 

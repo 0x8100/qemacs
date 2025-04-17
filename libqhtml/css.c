@@ -2,7 +2,7 @@
  * CSS core for qemacs.
  *
  * Copyright (c) 2000-2002 Fabrice Bellard.
- * Copyright (c) 2007-2024 Charlie Gordon.
+ * Copyright (c) 2007-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -30,7 +30,6 @@
 #include "css.h"
 
 // XXX: need fix for this: should use read function with opaque argument
-struct EditBuffer;
 char32_t eb_nextc(struct EditBuffer *b, int offset, int *next_ptr);
 
 //#define DEBUG
@@ -339,7 +338,7 @@ CSSIdent css_new_ident(const char *str)
     if (table_ident_nb == table_ident_allocated) {
         /* realloc ident table if needed */
         n = table_ident_allocated + CSS_IDENT_INCR;
-        if (!qe_realloc(&table_ident, n * sizeof(CSSIdentEntry *))) {
+        if (!qe_realloc_array(&table_ident, n)) {
             return CSS_ID_NIL;
         }
         table_ident_allocated = n;
@@ -373,6 +372,17 @@ static void css_init_idents(void)
         buf[r - p] = '\0';
         css_new_ident(buf);
     }
+}
+
+static void css_free_idents(void)
+{
+    int i;
+
+    for (i = 0; i < table_ident_nb; i++)
+        qe_free(&table_ident[i]);
+    qe_free(&table_ident);
+    table_ident_nb = table_ident_allocated = 0;
+    memset(hash_ident, 0, sizeof(hash_ident));
 }
 
 /****************************************************/
@@ -523,12 +533,9 @@ static inline int attribute_match(CSSStyleSheetAttributeEntry *e,
     CSSIdent attr;
     int op;
 
-    /* no match possible if no attribute */
-    if (!a)
-        return 0;
     attr = e->attr;
     op = e->op;
-    do {
+    for (; a != NULL; a = a->next) {
         if (attr == a->attr) {
             switch (op) {
             case CSS_ATTR_OP_SET:
@@ -544,16 +551,14 @@ static inline int attribute_match(CSSStyleSheetAttributeEntry *e,
                 break;
             }
         }
-        a = a->next;
-    } while (a != NULL);
+    }
     return 0;
 }
 
 /* return true if (box,pelement) matches simple selector ss (may
    recurse) */
 /* XXX: exclude anonymous boxes */
-static int selector_match(CSSSimpleSelector *ss,
-                          CSSBox *box)
+static int selector_match(CSSSimpleSelector *ss, CSSBox *box)
 {
     CSSStyleSheetAttributeEntry *ae;
     CSSBox *box1, *lbox;
@@ -888,7 +893,7 @@ static CSSState *allocate_props(CSSContext *s, CSSState *props)
         pp = &p->hash_next;
     }
     /* add new props */
-    p = qe_malloc_dup(props, sizeof(CSSState));
+    p = qe_malloc_dup_array(props, 1);
     if (!p)
         return NULL;
     s->nb_props++;
@@ -1956,7 +1961,7 @@ static void css_flush_line(InlineLayout *s,
 
     if (level_max > 0) {
         /* needed to do bidir reordering */
-        box_table = qe_malloc_dup(line_boxes, sizeof(InlineBox) * nb_boxes);
+        box_table = qe_malloc_dup_array(line_boxes, nb_boxes);
         if (box_table) {
             /* record the logical order of the boxes */
             /* rearrange them to match visual order */
@@ -2543,7 +2548,7 @@ static void allocate_column(TableLayout *s)
     s->nb_cols++;
     if (s->nb_cols > s->nb_cols_allocated) {
         s->nb_cols_allocated = s->nb_cols_allocated + COL_INCR;
-        qe_realloc(&s->cols, s->nb_cols_allocated * sizeof(ColStruct));
+        qe_realloc_array(&s->cols, s->nb_cols_allocated);
         memset(s->cols + s->nb_cols_allocated - COL_INCR, 0,
                COL_INCR * sizeof(ColStruct));
     }
@@ -4609,4 +4614,9 @@ void css_delete_document(CSSContext **sp)
 void css_init(void)
 {
     css_init_idents();
+}
+
+void css_exit(void)
+{
+    css_free_idents();
 }

@@ -11,6 +11,8 @@
 
 #export out=""
 
+check="$1"
+
 output() {
     echo -ne "$1"
     #export out="$out$1"
@@ -25,7 +27,10 @@ setBackgroundColor() {
     # printf '\x1bPtmux;\x1b\x1b[48;2;%s;%s;%sm' $1 $2 $3
     # printf '\x1b[48;2;%s;%s;%sm%s' $1 $2 $3 "$4"
     #echo -ne "\033[48;2;$1;$2;$3m$4"
-    output "\033[48;2;$1;$2;$3m$4"
+    let rr="$1"
+    let gg="$2"
+    let bb="$3"
+    output "\033[48;2;${rr};${gg};${bb}m$4"
 }
 
 resetColor() {
@@ -67,6 +72,28 @@ rainbowColor() {
         # execution should never reach here
         echo "0 0 0"
     fi
+}
+
+paletteRamp() {
+    let end=$1+$2-1
+    for i in `seq $1 $end`; do
+        output "\033[48;5;${i}m$3"
+    done
+    resetColor $'\n';
+}
+
+paletteEmulate() {
+    let end=$1+$2-1
+    for i in `seq $1 $end`; do
+        let rr6="$i/36%6"
+        let gg6="$i/6%6"
+        let bb6="$i%6"
+        let rr="$rr6?$rr6*40+55:0"
+        let gg="$gg6?$gg6*40+55:0"
+        let bb="$bb6?$bb6*40+55:0"
+        output "\033[48;2;${rr};${gg};${bb}m$3"
+    done
+    resetColor $'\n';
 }
 
 colorRamp() {
@@ -141,24 +168,87 @@ rainbowRamp() {
     resetColor $'\n'
 }
 
-output $'\n'
-output $'Color cube 4x4x4:\n';
-for i in `seq 0 3`; do
-  for g in `seq 0 15`; do
-    for r in `seq 0 3`; do
-      for b in `seq 0 15`; do
-        let r1=$r+$i*4
-        let rr=$r1*17
-        let gg=$g*17
-        let bb=$b*17
-        setBackgroundColor $rr $gg $bb $'  '
+colorCube4x4x4() {
+  for i in `seq 0 3`; do
+    for g in `seq 0 15`; do
+      for r in `seq 0 3`; do
+        for b in `seq 0 15`; do
+          let r1=$r+$i*4
+          let rr=$r1*17
+          let gg=$g*17
+          let bb=$b*17
+          setBackgroundColor $rr $gg $bb "$1"
+        done
+        resetColor $' '
       done
-      resetColor $' '
+      resetColor $'\n'
     done
     resetColor $'\n'
   done
-  resetColor $'\n'
-done
+}
+
+xtermPalette() {
+    paletteRamp 0 16 $'  '
+    if [ "$check" == "xxx" ] ; then
+        setBackgroundColor 0x00 0x00 0x00 $'  '
+        setBackgroundColor 0xbb 0x00 0x00 $'  '
+        setBackgroundColor 0x00 0xbb 0x00 $'  '
+        setBackgroundColor 0xbb 0xbb 0x00 $'  '
+        setBackgroundColor 0x00 0x00 0xbb $'  '
+        setBackgroundColor 0xbb 0x00 0xbb $'  '
+        setBackgroundColor 0x00 0xbb 0xbb $'  '
+        setBackgroundColor 0xbb 0xbb 0xbb $'  '
+        setBackgroundColor 0x55 0x55 0x55 $'  '
+        setBackgroundColor 0xff 0x55 0x55 $'  '
+        setBackgroundColor 0x55 0xff 0x55 $'  '
+        setBackgroundColor 0xff 0xff 0x55 $'  '
+        setBackgroundColor 0x55 0x55 0xff $'  '
+        setBackgroundColor 0xff 0x55 0xff $'  '
+        setBackgroundColor 0x55 0xff 0xff $'  '
+        setBackgroundColor 0xff 0xff 0xff $'  '
+        resetColor $'\n'
+    fi
+    if [ "$check" == "check" ] ; then
+        setBackgroundColor 0x00 0x00 0x00 $'  ' Black
+        setBackgroundColor 0x80 0x00 0x00 $'  ' Maroon
+        setBackgroundColor 0x00 0x80 0x00 $'  ' Green
+        setBackgroundColor 0x80 0x80 0x00 $'  ' Olive
+        setBackgroundColor 0x00 0x00 0x80 $'  ' Navy
+        setBackgroundColor 0x80 0x00 0x80 $'  ' Purple
+        setBackgroundColor 0x00 0x80 0x80 $'  ' Teal
+        setBackgroundColor 0xc0 0xc0 0xc0 $'  ' Silver
+        setBackgroundColor 0x80 0x80 0x80 $'  ' Grey
+        setBackgroundColor 0xff 0x00 0x00 $'  ' Red
+        setBackgroundColor 0x00 0xff 0x00 $'  ' Lime
+        setBackgroundColor 0xff 0xff 0x00 $'  ' Yellow
+        setBackgroundColor 0x00 0x00 0xff $'  ' Blue
+        setBackgroundColor 0xff 0x00 0xff $'  ' Fuchsia
+        setBackgroundColor 0x00 0xff 0xff $'  ' Aqua
+        setBackgroundColor 0xff 0xff 0xff $'  ' White
+        resetColor $'\n'
+    fi
+    for i in `seq 0 5`; do
+        let start=16+$i*36
+        let startE=$i*36
+        paletteRamp $start 36 $'  '
+        if [ "$check" == "check" ] ; then
+            paletteEmulate $startE 36 $'  '
+        fi
+    done
+    paletteRamp 232 24 $'  '
+    if [ "$check" == "check" ] ; then
+        for i in 0x08 0x12 0x1c 0x26 0x30 0x3a 0x44 0x4e \
+                 0x58 0x62 0x6c 0x76 0x80 0x8a 0x94 0x9e \
+                 0xa8 0xb2 0xbc 0xc6 0xd0 0xda 0xe4 0xee ; do
+            setBackgroundColor $i $i $i $'  '
+        done
+        resetColor $'\n'
+    fi
+}
+
+output $'\n'
+output $'Color cube 4x4x4:\n';
+colorCube4x4x4 $'  '
 
 output $'\n'
 output $'Color ramps: fade to black\n';
@@ -193,14 +283,6 @@ rainbowRamp $' '
 
 output $'\n'
 output $'xterm palette:\n';
-{
-    for i in `seq 0 127`; do
-        output "\033[48;5;${i}m "
-    done
-    resetColor $'\n'
-    for i in `seq 128 255`; do
-        output "\033[48;5;${i}m "
-    done
-    resetColor $'\n'
-}
+xtermPalette
+
 flush;

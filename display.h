@@ -2,7 +2,7 @@
  * Display system for QEmacs
  *
  * Copyright (c) 2000 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -71,6 +71,7 @@ typedef struct QEPicture {
     int tcolor;
 } QEPicture;
 
+struct QEmacsState;
 typedef struct QEditScreen QEditScreen;
 typedef struct QEDisplay QEDisplay;
 struct EditBuffer;
@@ -80,7 +81,7 @@ struct QEDisplay {
     const char *name;
     int xfactor, yfactor;
     int (*dpy_probe)(void);
-    int (*dpy_init)(QEditScreen *s, int w, int h);
+    int (*dpy_init)(QEditScreen *s, struct QEmacsState *qs, int w, int h);
     void (*dpy_close)(QEditScreen *s);
     void (*dpy_flush)(QEditScreen *s);
     int (*dpy_is_user_input_pending)(QEditScreen *s);
@@ -121,15 +122,19 @@ struct QEDisplay {
                             int flags);
     void (*dpy_full_screen)(QEditScreen *s, int full_screen);
     void (*dpy_describe)(QEditScreen *s, struct EditBuffer *b);
+    void (*dpy_sound_bell)(QEditScreen *s);
+    void (*dpy_suspend)(QEditScreen *s);
+    void (*dpy_error)(QEditScreen *s, const char *fmt, ...) qe__attr_printf(2,3);
     QEDisplay *next;
 };
 
 struct QEditScreen {
     QEDisplay dpy;
+    struct QEmacsState *qs;
     FILE *STDIN, *STDOUT;
     int width, height;
     const struct QECharset *charset; /* the charset of the TTY, XXX: suppress that,
-                          use a system in fonts instead */
+                                        use a system in fonts instead */
     int unicode_version;
     int media; /* media type (see CSS_MEDIA_xxx) */
     QEBitmapFormat bitmap_format; /* supported bitmap format */
@@ -140,10 +145,10 @@ struct QEditScreen {
     void *priv_data;
 };
 
-int qe_register_display(QEDisplay *dpy);
+int qe_register_display(struct QEmacsState *qs, QEDisplay *dpy);
 QEDisplay *probe_display(void);
 
-int screen_init(QEditScreen *s, QEDisplay *dpy, int w, int h);
+int qe_screen_init(struct QEmacsState *qs, QEditScreen *s, QEDisplay *dpy, int w, int h);
 
 static inline void dpy_close(QEditScreen *s)
 {
@@ -234,6 +239,14 @@ static inline void dpy_describe(QEditScreen *s, struct EditBuffer *b)
     if (s->dpy.dpy_describe)
         s->dpy.dpy_describe(s, b);
 }
+
+static inline void dpy_sound_bell(QEditScreen *s)
+{
+    if (s->dpy.dpy_sound_bell)
+        s->dpy.dpy_sound_bell(s);
+}
+
+#define dpy_error(ds, ...)   do { if ((ds)->dpy.dpy_error) ((ds)->dpy.dpy_error)(ds, __VA_ARGS__); } while (0)
 
 /* XXX: only needed for backward compatibility */
 static inline int glyph_width(QEditScreen *s, QEFont *font, char32_t ch) {

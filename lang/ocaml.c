@@ -1,7 +1,7 @@
 /*
  * ML/Ocaml language mode for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -63,7 +63,8 @@ enum {
 };
 
 static void ocaml_colorize_line(QEColorizeContext *cp,
-                                char32_t *str, int n, ModeDef *syn)
+                                const char32_t *str, int n,
+                                QETermStyle *sbuf, ModeDef *syn)
 {
     char keyword[16];
     int i = 0, start = i, k, style, len;
@@ -81,7 +82,7 @@ static void ocaml_colorize_line(QEColorizeContext *cp,
          * and preprocessor # line directives
          */
         i = n;
-        SET_COLOR(str, start, i, OCAML_STYLE_PREPROCESS);
+        SET_STYLE(sbuf, start, i, OCAML_STYLE_PREPROCESS);
     }
 
     while (i < n) {
@@ -111,7 +112,7 @@ static void ocaml_colorize_line(QEColorizeContext *cp,
                         break;
                 }
             }
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             continue;
         case '\"':
             colstate = IN_OCAML_STRING;
@@ -128,7 +129,7 @@ static void ocaml_colorize_line(QEColorizeContext *cp,
                     break;
                 }
             }
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             continue;
         case '\'':
             /* parse type atom or char const */
@@ -149,7 +150,7 @@ static void ocaml_colorize_line(QEColorizeContext *cp,
                     i++;
                 style = OCAML_STYLE_TYPE;
             }
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             continue;
         default:
             break;
@@ -204,7 +205,7 @@ static void ocaml_colorize_line(QEColorizeContext *cp,
                     }
                 }
             }
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             continue;
         }
         /* parse identifiers and keywords */
@@ -223,13 +224,11 @@ static void ocaml_colorize_line(QEColorizeContext *cp,
                 style = OCAML_STYLE_KEYWORD;
             } else {
                 style = OCAML_STYLE_IDENTIFIER;
-                k = i;
-                if (qe_isblank(str[k]))
-                    k++;
+                k = cp_skip_blanks(str, i, n);
                 if (str[k] == '(' && str[k + 1] != '*')
                     style = OCAML_STYLE_FUNCTION;
             }
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             continue;
         }
     }
@@ -273,11 +272,10 @@ static ModeDef eff_mode = {
     .colorize_func = ocaml_colorize_line,
 };
 
-static int ocaml_init(void)
+static int ocaml_init(QEmacsState *qs)
 {
-    qe_register_mode(&ocaml_mode, MODEF_SYNTAX);
-    qe_register_mode(&eff_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &ocaml_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &eff_mode, MODEF_SYNTAX);
     return 0;
 }
 

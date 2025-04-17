@@ -1,6 +1,179 @@
-<!-- TODO list for qemacs -- Author: Charles Gordon -- Updated: 2023-02-21 -->
+<!-- TODO list for qemacs -- Author: Charlie Gordon -- Updated: 2025-02-10 -->
 
 # QEmacs TODO list
+
+## Current work
+
+* should `mark` be a window variable instead of a buffer variable?
+* should `tab-width` be a window variable instead of or in addition to a buffer variable?
+* extra modes for drujensen/fib repo:
+    es(escript), janet, k(K), p6, pony, ps1, pyx(cython), raku(rakudo), vb, zig
+    detect flavors: ldc2?, bash, powershell, pypy, qb64, guile, sbcl
+* drag out of window should generate **autorepeat** scrolling requests
+* prevent mouse focus to window if searching
+* prevent mouse focus to window if minibuf active
+* only get tty clipboard contents on yank
+* only set tty clipboard contents if kill buffer changed during focus time
+* add script variable for clipboard support
+* add command line options for terminal features: backspace
+* add command line options for tracing
+* add command line options for color support
+* add script variable for terminal features: backspace
+* add script variable for tracing
+* add script variable for color support
+* from emacs:
+  - `set-background-color`
+    Set the background color of the selected frame to COLOR-NAME.
+  - `set-border-color`
+    Set the color of the border of the selected frame to COLOR-NAME.
+  - `set-cursor-color`
+    Set the text cursor color of the selected frame to COLOR-NAME.
+  - `set-foreground-color`
+    Set the foreground color of the selected frame to COLOR-NAME.
+  These commands provide a multi-column completion window
+
+* test other terminals: Terminal.app, wezTerm, Visor, Guake, or Yakuake
+* check out Eternal Terminal: https://mistertea.github.io/EternalTerminal/
+* DEC SET 1036 ESC or Alt keys
+* stb: add magic number detection
+* shell integration: easily navigate to previous shell prompts with `M-S-up` and `M-S-down`.
+  use buffer properties for this
+* timestamp shell commands
+* remanent annotations on files and buffers
+* autoblame source code
+* auto-complete previously used commands when no other context is available
+* handle paste bracketting in xterm: `ESC [ 2 0 0 ~ xxx ESC [ 2 0 1 ~`
+* display images using iTerm's image transfert protocol
+* evaluate colors in expressions: `rgb(r,g,b)`, `hsl(h,s,l)`, `hsv(h,s,v)`
+* do not abort macro on incremental search failure, just on final failure upon RET
+* `show-date-and-time` should distinguish between `C-u` and explicit number prefix
+* change accent input method: type accents before the character:
+  when inserting an accent, insert a space before and do not move point
+  when inserting a character before an accented space, replace
+* fix markdown command bindings
+* toggle long listing and column listing in dired buffers
+* keep a list of windows in `EditBuffer`
+* keep the last active window when detaching a buffer, just make it invisible.
+  - easy if deleting the last window that shows the buffer
+  - if changing the buffer for a window, if the new buffer has a pending window, use that
+  - otherwise, create a new `EditWindow` with the same screen position for the new buffer.
+  - alternative: keep previous window if changing the buffer so swapping back restores the position and mode
+  - add a previous window for `predict_switch_to_buffer`
+* `-color_code` command line option to display available colors on terminal
+* automatic remote config fetch based on email at qemacs.org:
+  - .qemacs, .bashrc...
+* shell buffer remote filesystem using commands `get` and `put` (for ssh sessions)
+* Use `OSC 1337` file transfert protocol for file and image download
+* `scroll-at-end`: down keys scrolls up when at end of buffer
+* fix multicursor kill/yank by restricting the number of kill buffers:
+    increase the number of kill buffers to `multi_cursor_cur`
+    kill uses the nth-buffer corresponding to the `multi_cursor_cur` variable
+    `yank-pop` is disabled in this mode
+    if no kill command occurred on a line, use the first buffer for yank
+    else it uses the one selected by the kill command
+* implement `narrow_start̀` and `narrow_end`
+* add bindings for other editors: `nano`, `vscode`, `emacs`, `qe`, (`vim` ???)
+* load bindings corresponding to invokation command or cmdline option
+* fix scroll window behavior (for Mg)
+* fix cursor positioning beyond end of screen
+* `C-g` in incremental search should reset the last search flags
+* support multiple modes in window using array of mode pointers
+* column number in status bar should account for TABs
+* sh-mode: handle heredoc strings `cat << EOF\n ... \nEOF\n`
+* pass `indent` to `ColorizeFunc`.
+* `TAB` -> complete function name from tags etc.
+* automatic multifile tags in project directory (where source management or tags file is found)
+* add parametric syntax definitions (nanorc files).
+* implement a maximum macro length and abort macro learning mode if reached
+* keep modified status when undoing past a buffer save command
+* swap buffer names in `compare-files`
+* check file time and length when selecting a different buffer or running any command on the current buffer:
+  - if a macro is running, stop it
+  - prompt the user for (r) read, (i) ignore, (k) keep, (c) compare
+  - if not modified since save, read in separate buffer and compare.
+     - if difference before window start, mark and/or point, try and resync
+  - if modified, modified version should be kept in a separate buffer.
+    emacs behavior:
+        You want to modify a buffer whose disk file has changed
+        since you last read it in or saved it with this buffer.
+
+        If you say y to go ahead and modify this buffer,
+        you risk ruining the work of whoever rewrote the file.
+        If you say r to revert, the contents of the buffer are refreshed
+        from the file on disk.
+        If you say n, the change you started to make will be aborted.
+
+        Usually, you should type r to get the latest version of the
+        file, then make the change again.
+
+* kill eval result so it can be yanked where appropriate
+* integrate qscript
+* pass argval and argflags for most commands
+* add buffer commands and point update commands
+* add `active_mark` and `active_region` flags in window/buffer states
+* Many commands change their behavior when Transient Mark mode is
+    in effect and the mark is active, by acting on the region instead
+    of their usual default part of the buffer's text.  Examples of
+    such commands include `M-;`, `flush-lines`, `keep-lines`,
+    - `delete-blank-lines`
+    - `query-replace`, `query-replace-regexp`, `replace-string`, `replace-regexp`,
+    - `ispell`, `ispell-word` -> `ispell-region`.
+    - `undo` -> undo changes restricted to the current region
+    - `eval-region-or-buffer`
+    - `isearch-forward`.
+    - `;` or `#` or `/`: comment the block
+    - `\` add and or align `\` line continuation characters (c like modes)
+    - `fill-paragraph`
+    - `mark-paragraph` extends the selection if already active
+* command aliases:
+    - `flush-lines` -> `delete-matching-lines`.
+    - `keep-lines` -> `keep-matching-lines`, `delete-non-matching-lines`.
+    - `how-many` (aka `count-matches`)
+* `goto-line` should not set mark if mark is already active
+* `whitespace-cleanup`
+    Command: Cleanup some blank problems in all buffer or at region.
+    It usually applies to the whole buffer, but in transient mark
+    mode when the mark is active, it applies to the region.  It also
+    applies to the region when it is not in transient mark mode, the
+    mark is active and C-u was pressed just before
+    calling `whitespace-cleanup` interactively.
+* `comment-dwim`
+    Command: Call the comment command you want (Do What I Mean).
+    If the region is active and `transient-mark-mode` is on, call
+    `comment-region` (unless it only consists of comments, in which
+    case it calls `uncomment-region`); in this case, prefix numeric
+    argument ARG specifies how many characters to remove from each
+    comment delimiter (so don't specify a prefix argument whose value
+    is greater than the total length of the comment delimiters).
+    Else, if the current line is empty, call `comment-insert-comment-function`
+    if it is defined, otherwise insert a comment and indent it.
+    Else, if a prefix ARG is specified, call `comment-kill`; in this
+    case, prefix numeric argument ARG specifies on how many lines to kill
+    the comments.
+    Else, call `comment-indent`.
+    You can configure `comment-style` to change the way regions are commented.
+
+* `indent-for-tab-command(int ARG)`
+    Indent the current line or region, or insert a tab, as appropriate.
+    This function either inserts a tab, or indents the current line,
+    or performs symbol completion, depending on `tab-always-indent`.
+    The function called to actually indent the line or insert a tab
+    is given by the variable `indent-line-function`.
+
+    If a prefix argument is given (ARG), after this function indents the
+    current line or inserts a tab, it also rigidly indents the entire
+    balanced expression which starts at the beginning of the current
+    line, to reflect the current line's indentation.
+
+    In most major modes, if point was in the current line's
+    indentation, it is moved to the first non-whitespace character
+    after indenting; otherwise it stays at the same position relative
+    to the text.
+
+    If `transient-mark-mode` is turned on and the region is active,
+    this function instead calls `indent-region`.  In this case, any
+    prefix argument is ignored.
+* add menubar
 
 ## Documentation / Support
 
@@ -18,13 +191,18 @@
 * help: `data-directory`, `data-path` ?
 * add command documentation in `describe-function`
 * add command documentation in `describe-variable`
+* cross link help pages
 * show memory stats in `describe-buffer` and `about-qemacs`
 * add function to add entry in **TODO.md**
 * move mailing list to github or private server
+* range restricted search and replace
+* different range display styles
 
 ## Core / Buffer / Input
 
-* `describe-key-briefly`, `local-set-key`, etc should use a special input mode to read a string of keys via the minibuffer to remove the `qe_key_process` hack and use the same input behavior as emacs.
+* `describe-key-briefly`, `local-set-key`, etc should use a special input mode
+  to read a string of keys via the minibuffer to remove the `qe_key_process` hack
+  and use the same input behavior as emacs.
 * in command specs, distinguish between interactive commands and non interactive functions
 * use tabulation context for `text_screen_width`
 * add method pointers in windows initialized from fallback chain
@@ -37,7 +215,7 @@
 * `qe_realloc`: typed and clear reallocated area
 * use failsafe memory allocator and `longjmp` recover.
 * move `ungot_key` to `key_context`
-* splitting pages should fall on 32 bit boundaries (difficult)
+* splitting pages should fall on 32-bit boundaries (difficult)
 * handle broken charset sequences across page boundaries
 * allow recursive main loop, and remove input callbacks
 * synced virtual buffers with restricted range
@@ -62,31 +240,16 @@
   an EditBuffer could also have an embedded QECursor with no EditState
 * use hash tables for command and variable names
 * sort key binding tables?
-* `next-buffer` command on C-x C-right
-* `previous-buffer` command on C-x C-left
-* `save-some-buffers` command on C-x s
-* standardize key prefixes: C-, M-, S- and possibly others
-* use C-M- prefix instead of M-C- in source and documentation but support
-both in `strtokey`
-* redefine `KEY_Fx` to make them sequential
-* rationalize KEY_xxx definitions and modifier bits to support all combinations
-* add registrable escape sequences and key names
-  ex: S-f5 = ^[[15;2~
-* add registrable key translations for NON ASCII input
-  ex: C-x 8 3 / 4	¾
+* `save-some-buffers` command on `C-x s`
+* add registrable escape sequences and key names (eg: `S-f5 = ^[[15;2~`)
+* add registrable key translations for NON ASCII input (eg: `C-x 8 3 / 4	¾`)
 
 ## Charsets / Unicode / Bidir
 
+### UTF-8 / Unicode
+
 * add default charset for new buffer creation, set that to utf8
 * better display of invalid UTF-8 encodings
-* change character detection API to handle cross page spanning
-* fix `eb_prev_char` to handle non self-synchronizing charsets
-* handle chinese encodings
-* handle euc-kr
-* add JIS missing encoding functions
-* add JIS charset probing functions
-* autodetect sjis, euc-jp...
-* fix kana input method
 * update cp directory from more recent unicode tables
 * UTF-8 variants: CESU-8, Modified UTF-8, UTF-16
 * UTF-1 obsolete standard encoding for Unicode
@@ -94,9 +257,27 @@ both in `strtokey`
 * limit number of combining marks to 20
 * use `unichar`, `rune` and/or `u8` types (using `char32_t` at the moment)
 * detect bad encoding and use `errno` to tell caller
+
+### East-asian
+
+* handle chinese encodings
+* handle euc-kr
+* add JIS missing encoding functions
+* add JIS charset probing functions
+* autodetect sjis, euc-jp...
+* fix kana input method
+
+### Bidir
+
+* test Hebrew keymap support.
+* rewrite bidirectional algorithm and support
+
+### Other
+
+* change character detection API to handle cross page spanning
+* fix `eb_prev_char` to handle non self-synchronizing charsets
 * auto/mixed eol mode
 * `set-eol-type` should take a string: auto/binary/dos/unix/mac/0/1/2...
-* display `^L` as horizontal line and consider as linebreak character
 * handle zero width codepoints:
   cp="200B" na="ZERO WIDTH SPACE" alias="ZWSP"
   cp="200C" na="ZERO WIDTH NON-JOINER" alias="ZWNJ"
@@ -104,8 +285,6 @@ both in `strtokey`
   cp="200E" na="LEFT-TO-RIGHT MARK" alias="LRM"
   cp="200F" na="RIGHT-TO-LEFT MARK" alias="RLM"
 * `set_input_method()` and `set_buffer_file_coding_system()` in config file.
-* test Hebrew keymap support.
-* rewrite bidirectional algorithm and support
 * use Unicode file hierarchy for code page files
 * handle or remove extra code page files:
   CP1006.TXT CP1253.TXT CP1254.TXT CP1255.TXT CP1258.TXT
@@ -116,7 +295,7 @@ both in `strtokey`
   MAC-CYRILLIC.TXT MAC-GREEK.TXT MAC-ICELAND.TXT MAC-TURKISH.TXT
   koi8_ru.cp APL-ISO-IR-68.TXT GSM0338.TXT SGML.TXT
 * deal with accents in filenames (macOS uses combining accents encoded as UTF-8)
-* rename `eb_putc` as it handles the full char32_t range
+* rename `eb_putc` as it handles the full `char32_t` range
 
 ## Windowing / Display
 
@@ -126,6 +305,7 @@ both in `strtokey`
 * fix current position when changing buffer attached to window
 * fix default wrap setting mess
 * display: add screen dump command and format
+* display `^L` as horizontal line and consider as linebreak character
 * colorize extra `^M` and `^Z` as preproc at end of line prior to calling the syntax highlighter (same as BOM)
 * colorizer bug on **/comp/projects/fractal/fractint/ORGFORM/NOEL-2.FRM** (triple `^M`)
 * display bug on **~/comp/projects/fractal/fractint/ORGFORM/BAILOUT.FRM** (double `^M`)
@@ -150,9 +330,6 @@ both in `strtokey`
 * multiple frames
 * lingering windows
 * cursor not found on **doc/256colors.raw** if `truncate-lines=1`
-* `enlarge-window-interactively`
-* `enlarge-window-horizontally`
-* `enlarge-window`
 * tab cursor displayed size
 * improve speed of text renderer / improve truncate mode
 * merge some good parts with CSS renderer ?.
@@ -184,6 +361,9 @@ insert_window_left()  deletes some left-most windows
 * fix column computation based on display properties:
   (variable pitch, tabs, ^x and \uxxxx stuff -- emacs behaviour) ?
 
+* tag left-view with electric navigation
+* expand / collapse region
+
 ## X11 display / graphics
 
 * handle X11 window manager close window event and exit cleanly
@@ -207,11 +387,12 @@ insert_window_left()  deletes some left-most windows
 * handle filenames with embedded spaces
 * use trick for entering spaces in filename prompts without completion
 * fix `s->offset` reset to 0 upon `C-x C-f newfile ENT C-x 2 C-x b ENT`
-* insert-file: load via separate buffer with charset conversion
+* `insert-file`: load via separate buffer with charset conversion
 * `qe_load_file` should split screen evenly for `LF_SPLIT_SCREEN` flag
 * [Idea] save file to non existent path -> create path.
 * [Idea] find-file: gist:snippet
 * Missing commands:
+  * `revert-file` on `C-x C-r`
   * `reload-file` on `C-x C-r`
   * `find-file-existing`
   * `find-other-frame` on `C-x 5 f`, `C-x 5 C-f`
@@ -228,7 +409,7 @@ insert_window_left()  deletes some left-most windows
 * improve speed: `C-x C-f ~/x2m RET C-u 1000 C-n` -> 4s
 * use a prefix to explore file in a popup window
 
-## Moving / Editing / Navigation
+# Moving / Editing / Navigation
 
 * pass argval and pagewise to `do_scroll_up_down()` or split command
 * files: fix `SPC` / `TAB` distinct behaviors on **~/comp/project/gnachman/**
@@ -250,9 +431,8 @@ insert_window_left()  deletes some left-most windows
   * `what-cursor-position` with universal prefix: show popup with long description
   * `compare-windows` should resync from the end of line.
   * `elastic-tabs`
-  * `indent-rigidly`
   * `show-matching-delimiters`
-  * blink-and-insert on `) } ] >`
+  * blink-and-insert on `) } ] >` or use different matching colors
   * `set-gosmacs-bindings` -> `set_emulation("gosmacs")`
   * `auto-fill-mode`
   * `auto-revert-mode`, `global-auto-revert-mode`, `auto-revert-tail-mode`
@@ -264,15 +444,14 @@ insert_window_left()  deletes some left-most windows
 * move by paragraph on `M-[` and `M-]`
 * `fill-paragraph` should default indentation for the second and subsequent
     lines to that of the first line
-* scroll horizontally on `M-{` and `M-}`
+* scroll horizontally on `M-{` and `M-}`: should move point if scrolling
+    moves it past the window borders
 * scroll up/down with argument should scroll by screen row.
 * simplify `C-z` and `A-z` accordingly
 * rectangular regions, cut/paste
-* multi-line editing
 
 ## Macros
 
-* `start-keyboard-macro` should clear current macro if called recursively
 * allow redefining the keyboard macro embedding itself
 * `show-macro`, `dump-macro` to ease macro debugging and timing
 * fix macro slowliness in 6000 line buffer **junk/dirs/x**
@@ -282,7 +461,6 @@ insert_window_left()  deletes some left-most windows
 * improve `dump-macro` to convert macro to string
 * fix `dump-macro` to save/restore `last-kbd-macro` to/from session
 * do not store messages during repeated macro execution or limit buffer size
-* `name-last-kbd-macro`
 * fix source syntax issues
 ```lisp
    (define-macro "last-kbd-macro" "A-fA-fC-FC-FC-@C-EA-wC-AC-NC-XnC-YC-MC-Xp")
@@ -301,7 +479,6 @@ insert_window_left()  deletes some left-most windows
 * basic: fix fuzzy completion when single unanchored match
 * completion: minibuffer completion: bad return on `C-x C-f . SPC qe SPC RET`
 * minibuf: use more mode specific bindings
-* minibuf: `minibuffer-electric-yank` in minibuffer to fix pathname
 * basic: completion in `load-resource-file`
 * completion: abbreviate lines in file completion list popup
 * open file with fuzzy completion
@@ -375,7 +552,6 @@ insert_window_left()  deletes some left-most windows
 * fix colors, default schemes...
 * add style recent changes (`highlight-recent-changes`)
 * make styles and log buffers read-only and display as binary
-* fix overlong line coloring
 * make `style-buffer-mode` and `log-buffer-mode`
 
 ## Modes
@@ -418,18 +594,19 @@ insert_window_left()  deletes some left-most windows
   * `list-definitions` with hot load function
   * `show-definition` in popup
   * handle standard libraries with tag system
-  * generate #include lines automatically
+  * generate `#include` lines automatically
 * autocomplete keyword, function, variable, member names
 * `c-mode` descendants:
+  * TAB in whitespace should remove forward white space and indent under
   * TAB at end of line or in space before \ should align on \ from previous line
-  * preserve macro \ alignment when editing
+  * preserve macro \ alignment when editing (auto overwrite)
   * see if java/javascript/c++ is OK.
   * `as-mode`: ActionStript files
   * `awk-mode`
-  * C++ mode
+  * `cpp-mode`: C++
   * `objc-mode`: Objective C
   * `csharp-mode`: C#
-  * `d-mode`
+  * `d-mode`: D
   * `java-mode`
   * `javascript-mode`, `js-mode` -> javascript files
     * support for v8 natives syntax %ddd()
@@ -469,6 +646,9 @@ insert_window_left()  deletes some left-most windows
 
 ### Shell mode
 
+* fix `man` command on linux: the man process should be given the expected input
+* parse the list of errors and register line/column positions so buffer can be modified
+    using this array, implement skip to the errors in the next file with `C-u C-x C-n`
 * [BUG] ^C does not work on OpenBSD
 * `C-x RET RET` should switch to last process buffer selected and move to the end of buffer
 * `C-x RET RET` should find another shell buffer if `*shell*` has been killed. Should enumerate all buffers.
@@ -499,6 +679,7 @@ insert_window_left()  deletes some left-most windows
 * fix infinite scroll for man command
 * man output bug on linux
 * man pager -> more bindings, such as `RET` -> `push-button` (jump to map page)
+* cross link man pages
 * accented letter input in shell mode
 * transcode between tty charset and shell buffer charset
 * track unsupported escapes in shell buffer
@@ -514,10 +695,8 @@ insert_window_left()  deletes some left-most windows
 
 ### Dired
 
-* dired view with outline and expand/collapse
 * dired view with generalized file matcher
 * dired: use window/buffer caption for directory and sizes description
-* dired: display directory links as directories and links, group with directories
 * dired: fork process and use asynchronous function to:
    - list directory contents
    - track directory contents file stats
@@ -525,22 +704,94 @@ insert_window_left()  deletes some left-most windows
 * keep dired current file upon: `RET C-x C-k RET`
 * use buffer specific load functions
 * separate buffer for each directory
-* adjust dired gutter width for max name length
 * snap dired left window horiz scroll
 * make dired left window temporary popleft window
 * improve dired (file commands, nicer display)
   * t -> `dired-touch`
   * | -> `dired-shell-command`
-  * D -> `dired-mkdir`
+  * + -> `dired-mkdir`
+* look into missing commands (emacs)
+  - `dired-find-file` on `e .. f`
+  - `dired-do-shell-command` on `!`
+  - `dired-hide-subdir` on `$`
+  - `dired-create-directory` on `+`
+  - `negative-argument` on `-`
+  - `digit-argument` on `0 .. 9`
+  - `dired-prev-dirline` on `<`
+  - `dired-diff` on `=`
+  - `dired-next-dirline` on `>`
+  - `dired-summary` on `?`
+  - `dired-do-search` on `A`
+  - `dired-do-byte-compile` on `B`
+  - `dired-do-copy` on `C`
+  - `dired-do-delete` on `D`
+  - `dired-do-chgrp` on `G`
+  - `dired-do-hardlink` on `H`
+  - `dired-do-load` on `L`
+  - `dired-do-chmod` on `M`
+  - `dired-do-chown` on `O`
+  - `dired-do-print` on `P`
+  - `dired-do-query-replace-regexp` on `Q`
+  - `dired-do-rename` on `R`
+    rename a file or move selection to another directory
+  - `dired-do-symlink` on `S`
+  - `dired-do-touch` on `T`
+  - `dired-unmark-all-marks` on `U`
+  - `dired-do-shell-command` on `X`
+  - `dired-do-compress` on `Z`
+  - `dired-up-directory` on `^`
+  - `dired-find-alternate-file` on `a`
+  - `describe-mode` on `h`
+  - `dired-maybe-insert-subdir` on `i, +`
+  - `dired-goto-file` on `j`
+  - `revert-buffer` on `g`
+    read all currently expanded directories aGain.
+  - `dired-do-kill-lines` on `k`
+  - `dired-do-redisplay` on `l`
+    relist single directory or marked files?
+  - `dired-find-file-other-window` on `o`
+  - `quit-window` on `q`
+  - `dired-sort-toggle-or-edit` on `s`
+    toggle sorting by name and by date
+    with prefix: set the ls command line options
+  - `dired-toggle-marks` on `t`
+  - `dired-view-file` on `v`
+  - `dired-copy-filename-as-kill` on `w`
+  - `dired-do-flagged-delete` on `x`
+  - `dired-show-file-type` on `y`
+  - `dired-flag-backup-files` on `~`
+  - `dired-tree-down` on `M-C-d`
+  - `dired-next-subdir` on `M-C-n`
+  - `dired-prev-subdir` on `M-C-p`
+  - `dired-tree-up` on `M-C-u`
+  - `dired-hide-all` on `M-$`
+  - `dired-prev-marked-file` on `M-{`
+  - `dired-next-marked-file` on `M-}`
+  - `dired-unmark-all-files` on `M-DEL`
+  - `dired-next-marked-file` on `* C-n`
+  - `dired-prev-marked-file` on `* C-p`
+  - `dired-unmark-all-marks` on `* !`
+  - `dired-mark-files-regexp` on `* %`
+  - `dired-mark-executables` on `* *`
+  - `dired-mark-directories` on `* /`
+  - `dired-unmark-all-files` on `* ?`
+  - `dired-mark-symlinks` on `* @`
+  - `dired-change-marks` on `* c`
+  - `dired-mark` on `* m`
+  - `dired-mark-subdir-files` on `* s`
+  - `dired-toggle-marks` on `* t`
+  - `dired-unmark` on `* u`
+    need commands for splitting, unsplitting, zooming, marking files globally.
 
 ### Bufed
 
 * show current directory for shell buffers in buffer list view
-* dired: use window/buffer caption for headings and sizes description
+* bufed: use window/buffer caption for headings and sizes description
 
 ### XML / HTML
 
 * [Idea] http request with headings
+* auto hierarchical view
 * merge xml and htmlsrc modes, add submodes for plist and other config files
 * xml/htmlsrc: scan for `</script>` beyond end of very long line
 * `&#x200c;` -> zero width causes missing chars at end of line
@@ -551,7 +802,6 @@ insert_window_left()  deletes some left-most windows
 * [BUG] xml: crash bug on **johnmacfarlane.net/texmath.xhtml**
 * `html-mode`: support hex entities
 * add syntax based wrapping mode for very long lines
-
 * distribute libqhtml as a separate project
 * OPTIMIZE `eb_nextc` et al or always duplicate box content (big speed improvement).
 * polish end of line offset/cursor displacement support.
@@ -665,6 +915,7 @@ insert_window_left()  deletes some left-most windows
   * `cg-mode`
   * `changelog-mode`
   * `chdr-mode`
+  * `cmake-mode`
   * `cmd-mode`: Windows cmd.exe command files.
   * `conf-mode`: configuration files.
   * `DCL-mode`
@@ -719,17 +970,17 @@ insert_window_left()  deletes some left-most windows
   * `sparql-mode`
   * `systemverilog-mode`
   * `t2t-mode`
-  * `tcl-mode`: Tcl files.
   * `texinfo-mode`
   * `vbnet-mode`
   * `verilog-mode`
   * `vhdl-mode`: VHDL files.
   * `xslt-mode`
-  * qmake, cmake, scons, ant, maven, bitC
+  * `yaml-mode`
+  * qmake, scons, ant, maven, bitC
 
-### New modes
+## New modes
 
-## `csv-mode`
+### `csv-mode`
 
 * CSV database functions
   - `csv_find(string where)`
@@ -744,21 +995,22 @@ insert_window_left()  deletes some left-most windows
   - `csv_insert_lines(string field_list)`
   - `csv_sort(string field_list)`
 
-## `json-mode`
+### `json-mode`
 
 * auto-wrap and indent
 * JSON database functions
+* pretty view with auto indent hierarchival view
 
-## `xml-mode`
+### `xml-mode`
 
 * auto-wrap and indent
 * XML database functions
 
-## Other modes
+### Other modes
 
 * `rst-mode`: support ReStructuredText (RST)
 * `auto-compression-mode`
-* minor modes with key override such as "preview" mode
+* minor modes with key override such as `preview` mode
 * `visual-diff-mode`: Use color-coding to compare two buffers.
 * calculator / spreadsheet mode (based on SC)
 * calendar mode
@@ -771,8 +1023,3 @@ insert_window_left()  deletes some left-most windows
 * abbreviation mode
 * ispell / spell checker
 * printing support
-
-## Fly zone
-
-* kill eval result so it can be yanked where appropriate
-* integrate qscript

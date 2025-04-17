@@ -1,7 +1,7 @@
 /*
  * Ruby language mode for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -92,36 +92,33 @@ static int ruby_get_name(char *buf, int size, const char32_t *str) {
 }
 
 static void ruby_colorize_line(QEColorizeContext *cp,
-                               char32_t *str, int n, ModeDef *syn)
+                               const char32_t *str, int n,
+                               QETermStyle *sbuf, ModeDef *syn)
 {
-    int i = 0, j, start = i, style = 0, indent, sig;
+    int i = 0, j, start = i, style = 0, indent;
     char32_t c;
     static char32_t sep, sep0;      /* XXX: ugly patch */
     static int level;               /* XXX: ugly patch */
     int state = cp->colorize_state;
     char kbuf[64];
 
-    for (indent = 0; qe_isblank(str[indent]); indent++)
-        continue;
+    indent = cp_skip_blanks(str, 0, n);
 
     if (state & IN_RUBY_HEREDOC) {
         if (state & IN_RUBY_HD_INDENT) {
-            while (qe_isblank(str[i]))
-                i++;
+            i = indent;
         }
-        sig = 0;
         if (qe_isalpha_(str[i])) {
-            sig = str[i++] % 61;
+            int sig = str[i++] % 61;
             for (; qe_isalnum_(str[i]); i++) {
                 sig = ((sig << 6) + str[i]) % 61;
             }
+            i = cp_skip_blanks(str, i, n);
+            if (i == n && (state & IN_RUBY_HD_SIG) == (sig & IN_RUBY_HD_SIG))
+                state &= ~(IN_RUBY_HEREDOC | IN_RUBY_HD_INDENT | IN_RUBY_HD_SIG);
         }
-        for (; qe_isblank(str[i]); i++)
-            continue;
         i = n;
-        SET_COLOR(str, start, i, RUBY_STYLE_HEREDOC);
-        if (i > 0 && i == n && (state & IN_RUBY_HD_SIG) == (sig & IN_RUBY_HD_SIG))
-            state &= ~(IN_RUBY_HEREDOC | IN_RUBY_HD_INDENT | IN_RUBY_HD_SIG);
+        SET_STYLE(sbuf, start, i, RUBY_STYLE_HEREDOC);
     } else {
         if (state & IN_RUBY_COMMENT)
             goto parse_c_comment;
@@ -152,13 +149,11 @@ static void ruby_colorize_line(QEColorizeContext *cp,
             if (str[i] == '=' && qe_isalpha(str[i + 1]))
                 style = RUBY_STYLE_KEYWORD;
             i = n;
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
         }
     }
 
-    while (i < n && qe_isblank(str[i]))
-        i++;
-
+    i = cp_skip_blanks(str, i, n);
     indent = i;
 
     while (i < n) {
@@ -183,8 +178,8 @@ static void ruby_colorize_line(QEColorizeContext *cp,
             if (start == indent
             ||  (str[i] != ' ' && str[i] != '='
             &&   i >= 2
-            &&   !qe_isalnum(str[i - 2] & CHAR_MASK)
-            &&   (str[i - 2] & CHAR_MASK) != ')')) {
+            &&   !qe_isalnum(str[i - 2])
+            &&   str[i - 2] != ')')) {
                 /* XXX: should use context to tell regex from divide */
                 /* parse regex */
                 state = IN_RUBY_REGEX;
@@ -349,7 +344,7 @@ static void ruby_colorize_line(QEColorizeContext *cp,
                  * space.
                  * XXX: should parse full here document syntax.
                  */
-                sig = 0;
+                int sig = 0;
                 j = i + 1;
                 if (str[j] == '-') {
                     j++;
@@ -485,7 +480,7 @@ static void ruby_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -511,10 +506,9 @@ static ModeDef ruby_mode = {
     .colorize_func = ruby_colorize_line,
 };
 
-static int ruby_init(void)
+static int ruby_init(QEmacsState *qs)
 {
-    qe_register_mode(&ruby_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &ruby_mode, MODEF_SYNTAX);
     return 0;
 }
 

@@ -1,7 +1,7 @@
 /*
  * Fortran language modes for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -59,15 +59,15 @@ enum {
 };
 
 static void fortran_colorize_line(QEColorizeContext *cp,
-                                 char32_t *str, int n, ModeDef *syn)
+                                  const char32_t *str, int n,
+                                  QETermStyle *sbuf, ModeDef *syn)
 {
     char keyword[16];
     int i = 0, start = i, style, len, w;
     char32_t c;
     int colstate = cp->colorize_state;
 
-    for (w = 0; qe_isblank(str[w]); w++)
-        continue;
+    w = cp_skip_blanks(str, 0, n);
 
     while (i < n) {
         start = i;
@@ -90,11 +90,11 @@ static void fortran_colorize_line(QEColorizeContext *cp,
             if (str[i] == '{') {
             preprocess:
                 i = n;
-                SET_COLOR(str, start, i, FORTRAN_STYLE_PREPROCESS);
+                SET_STYLE(sbuf, start, i, FORTRAN_STYLE_PREPROCESS);
                 continue;
             }
             i = n;
-            SET_COLOR(str, start, i, FORTRAN_STYLE_COMMENT);
+            SET_STYLE(sbuf, start, i, FORTRAN_STYLE_COMMENT);
             continue;
         case '\'':
         case '\"':
@@ -104,7 +104,7 @@ static void fortran_colorize_line(QEColorizeContext *cp,
                 if (str[i++] == c)
                     break;
             }
-            SET_COLOR(str, start, i, FORTRAN_STYLE_STRING);
+            SET_STYLE(sbuf, start, i, FORTRAN_STYLE_STRING);
             continue;
         default:
             break;
@@ -127,7 +127,7 @@ static void fortran_colorize_line(QEColorizeContext *cp,
                         continue;
                 }
             }
-            SET_COLOR(str, start, i, FORTRAN_STYLE_NUMBER);
+            SET_STYLE(sbuf, start, i, FORTRAN_STYLE_NUMBER);
             continue;
         }
         /* parse identifiers and keywords */
@@ -154,7 +154,7 @@ static void fortran_colorize_line(QEColorizeContext *cp,
             else
                 style = FORTRAN_STYLE_IDENTIFIER;
 
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             continue;
         }
     }
@@ -169,10 +169,9 @@ static ModeDef fortran_mode = {
     .colorize_func = fortran_colorize_line,
 };
 
-static int fortran_init(void)
+static int fortran_init(QEmacsState *qs)
 {
-    qe_register_mode(&fortran_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &fortran_mode, MODEF_SYNTAX);
     return 0;
 }
 

@@ -2,6 +2,7 @@
  * CSS2 parser for qemacs.
  *
  * Copyright (c) 2000-2002 Fabrice Bellard.
+ * Copyright (c) 2007-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -48,7 +49,7 @@
 #include <assert.h>
 
 static void css_error1(CSSParseState *b, const char *fmt, ...)
-         qe__attr_printf(2,3);
+    qe__attr_printf(2,3);
 
 static void css_error1(CSSParseState *b, const char *fmt, ...)
 {
@@ -56,8 +57,8 @@ static void css_error1(CSSParseState *b, const char *fmt, ...)
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
-    css_error(b->filename, b->line_num, buf);
     va_end(ap);
+    css_error(b->error_opaque, b->filename, b->line_num, buf);
 }
 
 /***********************************************************/
@@ -72,6 +73,7 @@ static int css_get_length(int *length_ptr, int *unit_ptr, const char *p)
     char buf[32];
     double f;
 
+    // FIXME: use strtod directly
     p1 = p;
     if (*p == '+' || *p == '-')
         p++;
@@ -874,7 +876,8 @@ static void beat(CSSParseState *b, int *ch_ptr, const char *str)
     *ch_ptr = ch;
 }
 
-static void parse_simple_selector(CSSSimpleSelector *ss, CSSParseState *b,
+static void parse_simple_selector(CSSSimpleSelector *ss, // output only
+                                  CSSParseState *b,
                                   int *ch_ptr)
 {
     char value[1024];
@@ -1077,7 +1080,7 @@ void css_parse_style_sheet(CSSStyleSheet *s, CSSParseState *b)
                 if (qe_isalpha(ch)) {
                     tree_op = CSS_TREE_OP_DESCENDANT;
                 add_tree:
-                    ss1 = qe_malloc_dup(ss, sizeof(CSSSimpleSelector));
+                    ss1 = qe_malloc_dup_array(ss, 1);
                     if (ss1) {
                         last_ss = ss1;
                     }
@@ -1131,9 +1134,10 @@ void css_parse_style_sheet(CSSStyleSheet *s, CSSParseState *b)
 #endif
 }
 
-void css_parse_style_sheet_str(CSSStyleSheet *s, const char *buffer, int flags)
+void css_parse_style_sheet_str(CSSStyleSheet *s, void *error_opaque, const char *buffer, int flags)
 {
     CSSParseState b1, *b = &b1;
+    b->error_opaque = error_opaque;
     b->ptr = buffer;
     b->filename = "builtin";
     b->line_num = 1;

@@ -1,7 +1,7 @@
 /*
  * Pascal language modes for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -63,7 +63,8 @@ enum {
 };
 
 static void pascal_colorize_line(QEColorizeContext *cp,
-                                 char32_t *str, int n, ModeDef *syn)
+                                 const char32_t *str, int n,
+                                 QETermStyle *sbuf, ModeDef *syn)
 {
     char kbuf[16];
     int i = 0, start = i, k, style = 0;
@@ -179,7 +180,7 @@ static void pascal_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -194,10 +195,9 @@ static ModeDef pascal_mode = {
     .colorize_func = pascal_colorize_line,
 };
 
-static int pascal_init(void)
+static int pascal_init(QEmacsState *qs)
 {
-    qe_register_mode(&pascal_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &pascal_mode, MODEF_SYNTAX);
     return 0;
 }
 

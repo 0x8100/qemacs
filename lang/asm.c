@@ -1,7 +1,7 @@
 /*
  * asm language mode for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -61,7 +61,8 @@ enum {
 };
 
 static void asm_colorize_line(QEColorizeContext *cp,
-                              char32_t *str, int n, ModeDef *syn)
+                              const char32_t *str, int n,
+                              QETermStyle *sbuf, ModeDef *syn)
 {
     char keyword[16];
     int i = 0, start = 0, style = 0, len, wn = 0; /* word number on line */
@@ -71,8 +72,7 @@ static void asm_colorize_line(QEColorizeContext *cp,
     if (colstate)
         goto in_comment;
 
-    for (; i < n && qe_isblank(str[i]); i++)
-        continue;
+    i = cp_skip_blanks(str, i, n);
 
     while (i < n) {
         start = i;
@@ -121,9 +121,8 @@ static void asm_colorize_line(QEColorizeContext *cp,
                 keyword[len] = '\0';
                 if (++wn == 1) {
                     if (strequal(keyword, "comment") && n > i) {
-                        SET_COLOR(str, start, i, ASM_STYLE_PREPROCESS);
-                        for (; i < n && qe_isblank(str[i]); i++)
-                            continue;
+                        SET_STYLE(sbuf, start, i, ASM_STYLE_PREPROCESS);
+                        i = cp_skip_blanks(str, i, n);
                         start = i;
                         colstate = str[i++];  /* end of comment character */
                         /* skip characters upto and including separator */
@@ -146,13 +145,13 @@ static void asm_colorize_line(QEColorizeContext *cp,
                         break;
                     }
                 }
-                //SET_COLOR(str, start, i, ASM_STYLE_IDENTIFIER);
+                //SET_STYLE(sbuf, start, i, ASM_STYLE_IDENTIFIER);
                 continue;
             }
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -165,10 +164,9 @@ static ModeDef asm_mode = {
     .colorize_func = asm_colorize_line,
 };
 
-static int asm_init(void)
+static int asm_init(QEmacsState *qs)
 {
-    qe_register_mode(&asm_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &asm_mode, MODEF_SYNTAX);
     return 0;
 }
 

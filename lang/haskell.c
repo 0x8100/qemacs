@@ -64,7 +64,8 @@ static inline int haskell_is_symbol(char32_t c)
 }
 
 static void haskell_colorize_line(QEColorizeContext *cp,
-                                  char32_t *str, int n, ModeDef *syn)
+                                  const char32_t *str, int n,
+                                  QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start = i, style = 0, level = 0, klen;
     char32_t c, sep = 0;
@@ -77,8 +78,7 @@ static void haskell_colorize_line(QEColorizeContext *cp,
     if (state & IN_HASKELL_STRING) {
         sep = '\"';
         state = 0;
-        while (qe_isblank(str[i]))
-            i++;
+        i = cp_skip_blanks(str, i, n);
         if (str[i] == '\\')
             i++;
         goto parse_string;
@@ -236,7 +236,7 @@ static void haskell_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -252,10 +252,9 @@ static ModeDef haskell_mode = {
     .colorize_func = haskell_colorize_line,
 };
 
-static int haskell_init(void)
+static int haskell_init(QEmacsState *qs)
 {
-    qe_register_mode(&haskell_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &haskell_mode, MODEF_SYNTAX);
     return 0;
 }
 

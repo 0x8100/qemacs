@@ -221,7 +221,7 @@ static inline VideoState *video_get_state(EditState *e, int status)
 static void video_refresh_timer(void *opaque)
 {
     EditState *s = opaque;
-    QEmacsState *qs = &qe_state;
+    QEmacsState *qs = s->qs;
     VideoState *is;
     VideoPicture *vp;
 
@@ -243,8 +243,7 @@ static void video_refresh_timer(void *opaque)
             is->no_background = 1; /* XXX: horrible, needs complete rewrite */
 
             /* display picture */
-            edit_display(qs);
-            dpy_flush(qs->screen);
+            qe_display(qs);
 
             /* update queue size and signal for next picture */
             if (++is->pictq_rindex == VIDEO_PICTURE_QUEUE_SIZE)
@@ -267,8 +266,7 @@ static void video_refresh_timer(void *opaque)
         is->no_background = 1; /* XXX: horrible, needs complete rewrite */
 
         /* display picture */
-        edit_display(qs);
-        dpy_flush(qs->screen);
+        qe_display(qs);
     } else {
         is->video_timer = qe_add_timer(100, s, video_refresh_timer);
     }
@@ -830,7 +828,7 @@ static int video_mode_init(EditState *s, EditBuffer *b, int flags)
 {
     if (s) {
         VideoState *is = qe_get_buffer_mode_data(b, &video_mode, NULL);
-        QEmacsState *qs = s->qe_state;
+        QEmacsState *qs = s->qs;
         int err, video_playing;
         EditState *e;
 
@@ -965,8 +963,8 @@ static void av_cycle_stream(EditState *s, int codec_type)
         start_index = is->audio_stream;
 
     if (start_index < 0) {
-        put_status(s, "No %s stream to cycle",
-                   (codec_type == CODEC_TYPE_VIDEO) ? "video" : "audio");
+        put_error(s, "No %s stream to cycle",
+                  (codec_type == CODEC_TYPE_VIDEO) ? "video" : "audio");
         return;
     }
 
@@ -975,8 +973,8 @@ static void av_cycle_stream(EditState *s, int codec_type)
         if (++stream_index >= ic->nb_streams)
             stream_index = 0;
         if (stream_index == start_index) {
-            put_status(s, "Only one %s stream",
-                       (codec_type == CODEC_TYPE_VIDEO) ? "video" : "audio");
+            put_error(s, "Only one %s stream",
+                      (codec_type == CODEC_TYPE_VIDEO) ? "video" : "audio");
             return;
         }
         st = ic->streams[stream_index];
@@ -1025,10 +1023,10 @@ static EditBufferDataType video_data_type = {
     video_buffer_close,
 };
 
-static int video_init(void) {
-    eb_register_data_type(&video_data_type);
-    qe_register_mode(&video_mode, MODEF_DATATYPE | MODEF_VIEW);
-    qe_register_commands(&video_mode, video_commands, countof(video_commands));
+static int video_init(QEmacsState *qs) {
+    qe_register_data_type(qs, &video_data_type);
+    qe_register_mode(qs, &video_mode, MODEF_DATATYPE | MODEF_VIEW);
+    qe_register_commands(qs, &video_mode, video_commands, countof(video_commands));
     return 0;
 }
 

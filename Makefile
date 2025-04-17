@@ -1,7 +1,7 @@
 # QEmacs, tiny but powerful multimode editor
 #
 # Copyright (c) 2000-2002 Fabrice Bellard.
-# Copyright (c) 2000-2023 Charlie Gordon.
+# Copyright (c) 2000-2025 Charlie Gordon.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -70,30 +70,62 @@ ifdef TARGET_ARCH_X86
   endif
 endif
 
-HOST_CFLAGS:=$(CFLAGS)
+ifeq ($(CC),$(HOST_CC))
+  HOST_CFLAGS:=$(CFLAGS)
+endif
 
 DEFINES=-DHAVE_QE_CONFIG_H
 
 ########################################################
 # do not modify after this
 
+ifeq ($(CC),clang)
+SANITIZE_CFLAGS := -fno-sanitize-recover=all -fno-omit-frame-pointer
+else
+SANITIZE_CFLAGS := -fno-omit-frame-pointer
+endif
+DEBUG_SUFFIX:=
 ifdef DEBUG
+$(info Building with debug info)
 DEBUG_SUFFIX:=_debug
 ECHO_CFLAGS += -DCONFIG_DEBUG
 CFLAGS += -g -O0
 LDFLAGS += -g -O0
-else
-DEBUG_SUFFIX:=
+endif
+ifdef ASAN
+$(info Building with ASan)
+DEBUG_SUFFIX:=_asan
+ECHO_CFLAGS += -DCONFIG_ASAN
+CFLAGS += -D__ASAN__
+CFLAGS += -fsanitize=address $(SANITIZE_CFLAGS) -g
+LDFLAGS += -fsanitize=address $(SANITIZE_CFLAGS) -g
+endif
+ifdef MSAN
+$(info Building with MSan)
+DEBUG_SUFFIX:=_msan
+ECHO_CFLAGS += -DCONFIG_MSAN
+CFLAGS += -D__MSAN__
+CFLAGS += -fsanitize=memory $(SANITIZE_CFLAGS) -g
+LDFLAGS += -fsanitize=memory $(SANITIZE_CFLAGS) -g
+endif
+ifdef UBSAN
+$(info Building with UBSan)
+DEBUG_SUFFIX:=_ubsan
+ECHO_CFLAGS += -DCONFIG_UBSAN
+CFLAGS += -D__UBSAN__
+CFLAGS += -fsanitize=undefined $(SANITIZE_CFLAGS) -g
+LDFLAGS += -fsanitize=undefined $(SANITIZE_CFLAGS) -g
 endif
 
 TARGETLIBS:=
 
+TOP:=0
 ifeq (,$(TARGET))
 TARGET:=qe
-TARGETS:=kmaps ligatures tqe
+TARGETS:=kmaps ligatures tqe qe-manual.md
+ifeq (,$(DEBUG_SUFFIX))
 TOP:=1
-else
-TOP:=0
+endif
 endif
 ifeq (,$(TARGET_OBJ))
 TARGET_OBJ:=$(TARGET)
@@ -101,6 +133,11 @@ endif
 
 OBJS:= qe.o cutils.o util.o color.o charset.o buffer.o search.o input.o display.o \
        qescript.o modes/hex.o
+
+ifdef CONFIG_32BIT
+CFLAGS += -m32
+LDFLAGS += -m32
+endif
 
 ifdef TARGET_TINY
 ECHO_CFLAGS += -DCONFIG_TINY
@@ -111,9 +148,9 @@ else
 OBJS+= extras.o variables.o
 endif
 
-ifdef CONFIG_DARWIN
-  LDFLAGS += -L/opt/local/lib/
-endif
+#ifdef CONFIG_DARWIN
+#  LDFLAGS += -L/opt/local/lib/
+#endif
 
 ifdef CONFIG_PNG_OUTPUT
   HTMLTOPPM_LIBS += -lpng
@@ -176,7 +213,8 @@ OBJS+= modes/unihex.o   modes/bufed.o    modes/orgmode.o  modes/markdown.o \
        lang/scad.o      lang/magpie.o    lang/falcon.o    lang/wolfram.o   \
        lang/tiger.o     lang/asm.o       lang/inifile.o   lang/postscript.o \
        lang/sharp.o     lang/emf.o       lang/csv.o       lang/crystal.o   \
-       modes/fractal.o  $(EXTRA_MODES)
+       lang/rye.o       lang/nanorc.o    lang/tcl.o       modes/fractal.o  \
+       $(EXTRA_MODES)
 ifndef CONFIG_WIN32
 OBJS+= modes/shell.o    modes/dired.o    modes/archive.o  modes/latex-mode.o
 endif
@@ -262,7 +300,7 @@ endif
 libqhtml: force
 	$(MAKE) -C libqhtml all
 
-ifdef DEBUG
+ifneq (,$(DEBUG_SUFFIX))
 $(TARGET)$(DEBUG_SUFFIX)$(EXE): $(OBJS) $(DEP_LIBS)
 	$(echo) LD $@
 	$(cmd)  $(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
@@ -283,13 +321,15 @@ endif
 ifeq (1,$(TOP))
 
 # targets that require recursion
-xqe:       force;	$(MAKE) TARGET=xqe TARGET_OBJ=qe TARGET_X11=1
-tqe:       force;	$(MAKE) TARGET=tqe TARGET_TINY=1
-debug:     force;	$(MAKE) TARGET=qe DEBUG=1
-qe_debug:  force;	$(MAKE) TARGET=qe DEBUG=1
-xqe_debug: force;	$(MAKE) TARGET=xqe TARGET_OBJ=qe TARGET_X11=1 DEBUG=1
-tqe_debug: force;	$(MAKE) TARGET=tqe TARGET_TINY=1 DEBUG=1
-tqe1:      force;	$(MAKE) TARGET=tqe TARGET_TINY=1 tqe1$(EXE)
+xqe:		force;	$(MAKE) TARGET=xqe TARGET_OBJ=qe TARGET_X11=1
+tqe:		force;	$(MAKE) TARGET=tqe TARGET_TINY=1
+tqe1:		force;	$(MAKE) TARGET=tqe TARGET_TINY=1 tqe1$(EXE)
+asan qe_asan:	force;	$(MAKE) TARGET=qe ASAN=1
+msan qe_msan:	force;	$(MAKE) TARGET=qe MSAN=1
+ubsan qe_ubsan:	force;	$(MAKE) TARGET=qe UBSAN=1
+debug qe_debug:	force;	$(MAKE) TARGET=qe DEBUG=1
+xqe_debug:	force;	$(MAKE) TARGET=xqe TARGET_OBJ=qe TARGET_X11=1 DEBUG=1
+tqe_debug:	force;	$(MAKE) TARGET=tqe TARGET_TINY=1 DEBUG=1
 
 else
 
@@ -326,20 +366,28 @@ $(OBJS_DIR)/$(TARGET)_modules.c: $(SRCS) Makefile config.mak
 	@echo '/* This file was generated automatically */' > $@
 	@echo '#include "qe.h"'                             >> $@
 	@echo '#undef qe_module_init'                       >> $@
-	@echo '#define qe_module_init(fn)  extern int module_##fn(void)' >> $@
-	@grep -h ^qe_module_init $(SRCS)                    >> $@
+	@echo '#define qe_module_init(fn)  extern int qe_module_##fn(QEmacsState *qs)' >> $@
+	-@grep -h ^qe_module_init $(SRCS)                   >> $@
 	@echo '#undef qe_module_init'                       >> $@
-	@echo 'void init_all_modules(void) {'               >> $@
-	@echo '#define qe_module_init(fn)  module_##fn()'   >> $@
-	@grep -h ^qe_module_init $(SRCS)                    >> $@
+	@echo 'void qe_init_all_modules(QEmacsState *qs) {' >> $@
+	@echo '#define qe_module_init(fn)  qe_module_##fn(qs)' >> $@
+	-@grep -h ^qe_module_init $(SRCS)                   >> $@
 	@echo '#undef qe_module_init'                       >> $@
+	@echo '}'                                           >> $@
+	@echo '#undef qe_module_exit'                       >> $@
+	@echo '#define qe_module_exit(fn)  extern void qe_module_##fn(QEmacsState *qs)' >> $@
+	-@grep -h ^qe_module_exit $(SRCS)                   >> $@
+	@echo '#undef qe_module_exit'                       >> $@
+	@echo 'void qe_exit_all_modules(QEmacsState *qs) {' >> $@
+	@echo '#define qe_module_exit(fn)  qe_module_##fn(qs)' >> $@
+	-@grep -h ^qe_module_exit $(SRCS)                   >> $@
+	@echo '#undef qe_module_exit'                       >> $@
 	@echo '}'                                           >> $@
 
 $(OBJS_DIR)/cfb.o: cfb.c cfb.h fbfrender.h
 $(OBJS_DIR)/charset.o: charset.c wcwidth.c
 $(OBJS_DIR)/charsetjis.o: charsetjis.c charsetjis.def
 $(OBJS_DIR)/fbfrender.o: fbfrender.c fbfrender.h libfbf.h
-$(OBJS_DIR)/qe.o: qe.c qeconfig.h
 $(OBJS_DIR)/modes/stb.o: modes/stb.c modes/stb_image.h
 $(OBJS_DIR)/libunicode.o: libunicode.c libunicode.h libunicode-table.h
 $(OBJS_DIR)/libregexp.o: libregexp.c libregexp.h libregexp-opcode.h
@@ -516,7 +564,7 @@ test:
 
 # documentation
 qe-manual.md: $(BINDIR)/scandoc$(EXE) qe-manual.c $(SRCS) $(DEPENDS) Makefile
-	$(BINDIR)/scandoc qe-manual.c $(SRCS) $(DEPENDS) > $@
+	$(BINDIR)/scandoc$(EXE) qe-manual.c $(SRCS) $(DEPENDS) > $@
 
 qe-doc.html: qe-doc.texi Makefile
 	LANGUAGE=en_US LC_ALL=en_US.UTF-8 texi2html -monolithic $<
@@ -540,7 +588,8 @@ clean:
 	rm -rf *.dSYM *.gch .objs* .tobjs* .xobjs* bin
 	rm -f *~ *.o *.a *.exe *_g *_debug TAGS gmon.out core *.exe.stackdump \
            qe tqe tqe1 xqe kmaptoqe ligtoqe html2png cptoqe jistoqe \
-           fbftoqe fbffonts.c allmodules.txt basemodules.txt '.#'*[0-9]
+           fbftoqe fbffonts.c allmodules.txt basemodules.txt '.#'*[0-9] \
+           qe_asan qe_msan qe_ubsan
 
 distclean: clean
 	$(MAKE) -C libqhtml distclean

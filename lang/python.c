@@ -1,7 +1,7 @@
 /*
  * Python language mode for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -57,6 +57,7 @@ enum {
     PYTHON_STYLE_KEYWORD =  QE_STYLE_KEYWORD,
     PYTHON_STYLE_FUNCTION = QE_STYLE_FUNCTION,
     PYTHON_STYLE_REGEX    = QE_STYLE_STRING,
+    PYTHON_STYLE_ANNOTATION = QE_STYLE_PREPROCESS,
 };
 
 enum {  // Python flavors
@@ -66,7 +67,8 @@ enum {  // Python flavors
 };
 
 static void python_colorize_line(QEColorizeContext *cp,
-                                 char32_t *str, int n, ModeDef *syn)
+                                 const char32_t *str, int n,
+                                 QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start = i, style = 0, i1, tag = 0;
     char32_t c, sep;
@@ -100,6 +102,11 @@ static void python_colorize_line(QEColorizeContext *cp,
         case '#':
             i = n;
             style = PYTHON_STYLE_COMMENT;
+            break;
+
+        case '@':
+            i += ustr_get_identifier(kbuf, countof(kbuf), c, str, i, n);
+            style = PYTHON_STYLE_ANNOTATION;
             break;
 
         case '\'':
@@ -157,12 +164,12 @@ static void python_colorize_line(QEColorizeContext *cp,
                 /* XXX: should use more context to tell regex from divide */
                 int prev = ' ';
                 for (i1 = start; i1 > 0; ) {
-                    prev = str[--i1] & CHAR_MASK;
+                    prev = str[--i1];
                     if (!qe_isblank(prev))
                         break;
                 }
                 if (qe_findchar(" [({},;=<>!~^&|*/%?:", prev)
-                 || (str[i1] >> STYLE_SHIFT) == PYTHON_STYLE_KEYWORD
+                 || sbuf[i1] == PYTHON_STYLE_KEYWORD
                  || (str[i] != ' ' && (str[i] != '=' || str[i + 1] != ' ') && !(qe_isalnum(prev) || prev == ')'))) {
                      /* parse regex */
                      int in_charclass = 0;
@@ -282,19 +289,16 @@ static void python_colorize_line(QEColorizeContext *cp,
                     style = PYTHON_STYLE_FUNCTION;
                     if (tag) {
                         /* tag function definition */
-                        eb_add_property(cp->b, cp->offset + start,
-                                        QE_PROP_TAG, qe_strdup(kbuf));
+                        eb_add_tag(cp->b, cp->offset + start, kbuf);
                         tag = 0;
                     }
                     break;
                 }
                 if (tag) {
-                    for (i1 = i; i1 < n && qe_isblank(str[i1]); i1++)
-                        continue;
+                    i1 = cp_skip_blanks(str, i, n);
                     if (qe_findchar(",=", str[i1])) {
                         /* tag variable definition */
-                        eb_add_property(cp->b, cp->offset + start,
-                                        QE_PROP_TAG, qe_strdup(kbuf));
+                        eb_add_tag(cp->b, cp->offset + start, kbuf);
                         /* XXX: should colorize variable definition */
                     }
                 }
@@ -303,7 +307,7 @@ static void python_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -344,7 +348,7 @@ static int bazel_mode_init(EditState *s, EditBuffer *b, int flags)
     if (s) {
         /* XXX: should use the default values from mode variables */
         s->indent_tabs_mode = 0;
-        s->indent_size = 2;
+        s->indent_width = 2;
     }
     return 0;
 }
@@ -359,12 +363,11 @@ static ModeDef bazel_mode = {
     .colorize_flags = PYTHON_BAZEL,
 };
 
-static int python_init(void)
+static int python_init(QEmacsState *qs)
 {
-    qe_register_mode(&python_mode, MODEF_SYNTAX);
-    qe_register_mode(&rapydscript_mode, MODEF_SYNTAX);
-    qe_register_mode(&bazel_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &python_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &rapydscript_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &bazel_mode, MODEF_SYNTAX);
     return 0;
 }
 

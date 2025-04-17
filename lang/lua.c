@@ -1,7 +1,7 @@
 /*
  * Lua language mode for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -54,6 +54,7 @@ enum {
     LUA_STYLE_LONGLIT =  QE_STYLE_STRING,
     LUA_STYLE_NUMBER =   QE_STYLE_NUMBER,
     LUA_STYLE_KEYWORD =  QE_STYLE_KEYWORD,
+    LUA_STYLE_TYPE =     QE_STYLE_TYPE,
     LUA_STYLE_FUNCTION = QE_STYLE_FUNCTION,
 };
 
@@ -71,7 +72,8 @@ static int lua_long_bracket(const char32_t *str, int *level) {
 }
 
 static void lua_colorize_line(QEColorizeContext *cp,
-                              char32_t *str, int n, ModeDef *syn)
+                              const char32_t *str, int n,
+                              QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, j, start = i, level = 0, level1, style;
     char32_t c, sep = 0;
@@ -108,7 +110,7 @@ static void lua_colorize_line(QEColorizeContext *cp,
                     goto parse_longlit;
                 }
                 i = n;
-                SET_COLOR(str, start, i, LUA_STYLE_COMMENT);
+                SET_STYLE(sbuf, start, i, LUA_STYLE_COMMENT);
                 continue;
             }
             break;
@@ -135,7 +137,7 @@ static void lua_colorize_line(QEColorizeContext *cp,
                     break;
                 }
             }
-            SET_COLOR(str, start, i, LUA_STYLE_STRING);
+            SET_STYLE(sbuf, start, i, LUA_STYLE_STRING);
             continue;
         case '[':
             if (lua_long_bracket(str + i - 1, &level)) {
@@ -155,7 +157,7 @@ static void lua_colorize_line(QEColorizeContext *cp,
                     break;
                 }
             }
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             continue;
         default:
             if (qe_isdigit(c)) {
@@ -164,13 +166,13 @@ static void lua_colorize_line(QEColorizeContext *cp,
                     if (!qe_isalnum(str[i]) && str[i] != '.')
                         break;
                 }
-                SET_COLOR(str, start, i, LUA_STYLE_NUMBER);
+                SET_STYLE(sbuf, start, i, LUA_STYLE_NUMBER);
                 continue;
             }
             if (qe_isalpha_(c)) {
                 i += ustr_get_identifier(kbuf, countof(kbuf), c, str, i, n);
                 if (strfind(syn->keywords, kbuf)) {
-                    SET_COLOR(str, start, i, LUA_STYLE_KEYWORD);
+                    SET_STYLE(sbuf, start, i, LUA_STYLE_KEYWORD);
                     continue;
                 }
                 for (j = i; j < n && qe_isspace(str[j]); j++)
@@ -178,7 +180,13 @@ static void lua_colorize_line(QEColorizeContext *cp,
                 /* function calls use parenthesized argument list or
                    single string or table literal */
                 if (qe_findchar("('\"{", str[j])) {
-                    SET_COLOR(str, start, i, LUA_STYLE_FUNCTION);
+                    SET_STYLE(sbuf, start, i, LUA_STYLE_FUNCTION);
+                    continue;
+                }
+                if (syn->types
+                &&  (strfind(syn->types, kbuf)
+                ||   (qe_isupper(c) && qe_islower(kbuf[1])))) {
+                    SET_STYLE(sbuf, start, i, LUA_STYLE_TYPE);
                     continue;
                 }
                 continue;
@@ -197,10 +205,32 @@ static ModeDef lua_mode = {
     .colorize_func = lua_colorize_line,
 };
 
-static int lua_init(void)
-{
-    qe_register_mode(&lua_mode, MODEF_SYNTAX);
+static char const teal_keywords[] = {
+    "|and|break|do|else|elseif|end|false|for|function|goto|if|in"
+    "|local|nil|not|or|repeat|require|return|then|true|until|while"
+    "|self|record|interface|enum|type|is|where"
+    "|"
+};
 
+static char const teal_types[] = {
+    // other types start with a capital letter
+    "|any|boolean|integer|number|string|FILE"
+    "|"
+};
+
+static ModeDef teal_mode = {
+    .name = "Teal",
+    .extensions = "tl",
+    .shell_handlers = "tl",
+    .keywords = teal_keywords,
+    .types = teal_types,
+    .colorize_func = lua_colorize_line,
+};
+
+static int lua_init(QEmacsState *qs)
+{
+    qe_register_mode(qs, &lua_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &teal_mode, MODEF_SYNTAX);
     return 0;
 }
 

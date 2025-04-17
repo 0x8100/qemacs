@@ -1,7 +1,7 @@
 /*
  * ini file mode for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -37,14 +37,13 @@ enum {
 };
 
 static void ini_colorize_line(QEColorizeContext *cp,
-                              char32_t *str, int n, ModeDef *syn)
+                              const char32_t *str, int n,
+                              QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start, style = 0, indent;
     char32_t c;
 
-    while (qe_isblank(str[i]))
-        i++;
-
+    i = cp_skip_blanks(str, i, n);
     indent = i;
 
     while (i < n) {
@@ -107,7 +106,7 @@ static void ini_colorize_line(QEColorizeContext *cp,
             }
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -153,10 +152,9 @@ static ModeDef ini_mode = {
     .colorize_func = ini_colorize_line,
 };
 
-static int ini_init(void)
+static int ini_init(QEmacsState *qs)
 {
-    qe_register_mode(&ini_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &ini_mode, MODEF_SYNTAX);
     return 0;
 }
 

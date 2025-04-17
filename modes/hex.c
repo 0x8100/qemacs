@@ -2,7 +2,7 @@
  * Hexadecimal modes for QEmacs.
  *
  * Copyright (c) 2000-2001 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -32,10 +32,12 @@ enum {
 
 static ModeDef hex_mode;
 
-static int to_disp(int c)
+static int bin_to_disp(int c)
 {
-#if 1
+#if 0
     /* Allow characters in range 160-255 to show as graphics */
+    // XXX: This causes alignment issues on screen remove sessions
+    //      eg: C-x C-d C-s ligatures
     if ((c & 127) < ' ' || c == 127)
         c = '.';
 #else
@@ -110,7 +112,7 @@ static int hex_display_line(EditState *s, DisplayState *ds, int offset)
                 offset1 = offset2 = -1;
             }
         }
-        display_char(ds, offset1, offset2, to_disp(b));
+        display_char(ds, offset1, offset2, bin_to_disp(b));
     }
     display_eol(ds, -1, -1);
 
@@ -367,15 +369,15 @@ static ModeDef hex_mode = {
     .fallback = &binary_mode,
 };
 
-static int hex_init(void)
+static int hex_init(QEmacsState *qs)
 {
     /* first register mode(s) */
-    qe_register_mode(&binary_mode, MODEF_VIEW);
-    qe_register_mode(&hex_mode, MODEF_VIEW);
+    qe_register_mode(qs, &binary_mode, MODEF_VIEW);
+    qe_register_mode(qs, &hex_mode, MODEF_VIEW);
 
     /* commands and default keys */
-    qe_register_commands(&binary_mode, binary_commands, countof(binary_commands));
-    qe_register_commands(&hex_mode, hex_commands, countof(hex_commands));
+    qe_register_commands(qs, &binary_mode, binary_commands, countof(binary_commands));
+    qe_register_commands(qs, &hex_mode, hex_commands, countof(hex_commands));
 
     return 0;
 }

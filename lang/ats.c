@@ -1,7 +1,7 @@
 /*
  * ATS (Applied Type System) mode for QEmacs.
  *
- * Copyright (c) 2016-2023 Charlie Gordon.
+ * Copyright (c) 2016-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -67,7 +67,8 @@ enum {
 };
 
 static void ats_colorize_line(QEColorizeContext *cp,
-                              char32_t *str, int n, ModeDef *syn)
+                              const char32_t *str, int n,
+                              QETermStyle *sbuf, ModeDef *syn)
 {
     char keyword[32];
     int i = 0, start = i, k, style = 0, len, level;
@@ -77,12 +78,12 @@ static void ats_colorize_line(QEColorizeContext *cp,
     if (colstate & IN_ATS_CBLOCK) {
         if (str[i] == '%' && str[i + 1] == '}') {
             colstate = 0;
-            SET_COLOR(str, i, n, ATS_STYLE_PREPROCESS);
+            SET_STYLE(sbuf, i, n, ATS_STYLE_PREPROCESS);
             i = n;
         } else {
             ModeDef *md = &c_mode;
             cp->colorize_state = colstate & ~IN_ATS_CBLOCK;
-            md->colorize_func(cp, str + i, n - i, md);
+            cp_colorize_line(cp, str, i, n, sbuf, md);
             colstate = cp->colorize_state | IN_ATS_CBLOCK;
             i = n;
         }
@@ -199,9 +200,7 @@ static void ats_colorize_line(QEColorizeContext *cp,
                 if (strfind(syn->types, keyword)) {
                     style = ATS_STYLE_TYPE;
                 } else {
-                    k = i;
-                    if (qe_isblank(str[k]))
-                        k++;
+                    k = cp_skip_blanks(str, i, n);
                     if (str[k] == '(' && str[k + 1] != '*')
                         style = ATS_STYLE_FUNCTION;
                     else
@@ -212,7 +211,7 @@ static void ats_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -227,10 +226,9 @@ static ModeDef ats_mode = {
     .colorize_func = ats_colorize_line,
 };
 
-static int ats_init(void)
+static int ats_init(QEmacsState *qs)
 {
-    qe_register_mode(&ats_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &ats_mode, MODEF_SYNTAX);
     return 0;
 }
 

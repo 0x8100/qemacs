@@ -1,7 +1,7 @@
 /*
  * Module for handling variables in QEmacs
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -66,6 +66,8 @@ static VarDef var_table[] = {
            "Set to ignore case in compare-windows." )
     S_VAR( "ignore-preproc", ignore_preproc, VAR_NUMBER, VAR_RW_SAVE,
            "Set to ignore preprocessing directives in compare-windows." )
+    S_VAR( "ignore-equivalent", ignore_equivalent, VAR_NUMBER, VAR_RW_SAVE,
+           "Set to ignore equivalent strings defined by define-equivalent." )
     S_VAR( "hilite-region", hilite_region, VAR_NUMBER, VAR_RW_SAVE,
            "Set to highlight the region after setting the mark." )
     S_VAR( "mmap-threshold", mmap_threshold, VAR_NUMBER, VAR_RW_SAVE,   // XXX: need set_value function
@@ -82,6 +84,8 @@ static VarDef var_table[] = {
            "Set to prevent automatic backups of modified files" )
     S_VAR( "c-label-indent", c_label_indent, VAR_NUMBER, VAR_RW_SAVE,
            "Number of columns to adjust indentation of C labels." )
+    S_VAR( "macro-counter", macro_counter, VAR_NUMBER, VAR_RW_SAVE,
+           "Macro counter: insert with C-x C-k TAB, set with C-x C-k C-c." )
 
     //B_VAR( "screen-charset", charset, VAR_NUMBER, VAR_RW, NULL )
 
@@ -100,7 +104,7 @@ static VarDef var_table[] = {
 
     W_VAR_F( "point", offset, VAR_NUMBER, VAR_RW, qe_variable_set_value_offset,    /* should be window-point */
            "Current value of point in this window." )
-    W_VAR( "indent-width", indent_size, VAR_NUMBER, VAR_RW,   // XXX: need set_value function
+    W_VAR( "indent-width", indent_width, VAR_NUMBER, VAR_RW,   // XXX: need set_value function
            "Number of columns to indent by for a syntactic level." )
     W_VAR( "indent-tabs-mode", indent_tabs_mode, VAR_NUMBER, VAR_RW,
            "Set if indentation can insert tabs." )
@@ -156,9 +160,8 @@ static VarDef var_table[] = {
     //G_VAR( "perl-mode-extensions", perl_mode.extensions, VAR_STRING, VAR_RW, NULL )
 };
 
-static VarDef *qe_find_variable(const char *name)
+static VarDef *qe_find_variable(QEmacsState *qs, const char *name)
 {
-    QEmacsState *qs = &qe_state;
     VarDef *vp;
 
     for (vp = qs->first_variable; vp; vp = vp->next) {
@@ -172,7 +175,7 @@ static VarDef *qe_find_variable(const char *name)
 }
 
 void variable_complete(CompleteState *cp, CompleteFunc enumerate) {
-    QEmacsState *qs = cp->s->qe_state;
+    QEmacsState *qs = cp->s->qs;
     const VarDef *vp;
 
     for (vp = qs->first_variable; vp; vp = vp->next) {
@@ -191,7 +194,7 @@ QVarType qe_get_variable(EditState *s, const char *name,
 
     /* find standard variable and user variables */
     // XXX: should also have window, buffer, mode properties?
-    vp = qe_find_variable(name);
+    vp = qe_find_variable(s->qs, name);
     if (!vp) {
         /* Try environment */
         str = getenv(name);
@@ -219,7 +222,7 @@ QVarType qe_get_variable(EditState *s, const char *name,
         ptr = vp->value.ptr;
         break;
     case VAR_STATE:
-        ptr = (const u8*)s->qe_state + vp->value.offset;
+        ptr = (const u8*)s->qs + vp->value.offset;
         break;
     case VAR_BUFFER:
         ptr = (const u8*)s->b + vp->value.offset;
@@ -332,10 +335,11 @@ static QVarType qe_variable_set_value_generic(EditState *s, VarDef *vp, void *pt
 QVarType qe_set_variable(EditState *s, const char *name,
                          const char *value, int num)
 {
+    QEmacsState *qs = s->qs;
     void *ptr;
     VarDef *vp;
 
-    vp = qe_find_variable(name);
+    vp = qe_find_variable(qs, name);
     if (!vp) {
         /* Create user variable (global/buffer/window/mode?) */
         vp = qe_mallocz(VarDef);
@@ -352,7 +356,7 @@ QVarType qe_set_variable(EditState *s, const char *name,
             vp->value.num = num;
             vp->type = VAR_NUMBER;
         }
-        qe_register_variables(vp, 1);
+        qe_register_variables(qs, vp, 1);
         return vp->type;
     } else
     if (vp->rw == VAR_RO) {
@@ -366,7 +370,7 @@ QVarType qe_set_variable(EditState *s, const char *name,
             ptr = vp->value.ptr;
             break;
         case VAR_STATE:
-            ptr = (u8*)s->qe_state + vp->value.offset;
+            ptr = (u8*)qs + vp->value.offset;
             break;
         case VAR_BUFFER:
             ptr = (u8*)s->b + vp->value.offset;
@@ -395,7 +399,7 @@ void do_show_variable(EditState *s, const char *name)
     char buf[MAX_FILENAME_SIZE];
 
     if (qe_get_variable(s, name, buf, sizeof(buf), NULL, 1) == VAR_UNKNOWN)
-        put_status(s, "No variable %s", name);
+        put_error(s, "No variable %s", name);
     else
         put_status(s, "%s -> %s", name, buf);
 }
@@ -404,13 +408,13 @@ void do_set_variable(EditState *s, const char *name, const char *value)
 {
     switch (qe_set_variable(s, name, value, 0)) {
     case VAR_UNKNOWN:
-        put_status(s, "Variable %s is invalid", name);
+        put_error(s, "Variable %s is invalid", name);
         break;
     case VAR_READONLY:
-        put_status(s, "Variable %s is read-only", name);
+        put_error(s, "Variable %s is read-only", name);
         break;
     case VAR_INVALID:
-        put_status(s, "Invalid value for variable %s: %s", name, value);
+        put_error(s, "Invalid value for variable %s: %s", name, value);
         break;
     default:
         do_show_variable(s, name);
@@ -422,11 +426,11 @@ static void do_describe_variable(EditState *s, const char *name) {
     EditBuffer *b;
     VarDef *vp;
 
-    if ((vp = qe_find_variable(name)) == NULL) {
-        put_status(s, "No variable %s", name);
+    if ((vp = qe_find_variable(s->qs, name)) == NULL) {
+        put_error(s, "No variable %s", name);
         return;
     }
-    b = new_help_buffer();
+    b = new_help_buffer(s);
     if (!b)
         return;
 
@@ -442,9 +446,8 @@ static void do_describe_variable(EditState *s, const char *name) {
     show_popup(s, b, "Help");
 }
 
-void qe_register_variables(VarDef *vars, int count)
+void qe_register_variables(QEmacsState *qs, VarDef *vars, int count)
 {
-    QEmacsState *qs = &qe_state;
     VarDef *vp;
 
     for (vp = vars; vp < vars + count; vp++) {
@@ -459,14 +462,13 @@ void qe_register_variables(VarDef *vars, int count)
 /* should register this as help function */
 void qe_list_variables(EditState *s, EditBuffer *b)
 {
-    QEmacsState *qs = s->qe_state;
     char buf[MAX_FILENAME_SIZE];
     char typebuf[32];
     const char *type;
     const VarDef *vp;
 
     eb_puts(b, "\n  variables:\n\n");
-    for (vp = qs->first_variable; vp; vp = vp->next) {
+    for (vp = s->qs->first_variable; vp; vp = vp->next) {
         /* XXX: merge with variable_print_entry() */
         switch (vp->type) {
         case VAR_NUMBER:
@@ -493,14 +495,13 @@ void qe_list_variables(EditState *s, EditBuffer *b)
 
 void qe_save_variables(EditState *s, EditBuffer *b)
 {
-    QEmacsState *qs = s->qe_state;
     char buf[MAX_FILENAME_SIZE];
     char varname[32], *p;
     const VarDef *vp;
 
     eb_puts(b, "// variables:\n");
     /* Only save customized variables */
-    for (vp = qs->first_variable; vp; vp = vp->next) {
+    for (vp = s->qs->first_variable; vp; vp = vp->next) {
         if (vp->rw != VAR_RW_SAVE || !vp->modified)
             continue;
         pstrcpy(varname, countof(varname), vp->name);
@@ -523,8 +524,7 @@ int eb_variable_print_entry(EditBuffer *b, VarDef *vp, EditState *s) {
     if (!vp)
         return 0;
 
-    len = eb_puts(b, vp->name);
-
+    *typebuf = '\0';
     switch (vp->type) {
     case VAR_NUMBER:
         type = "int";
@@ -533,13 +533,17 @@ int eb_variable_print_entry(EditBuffer *b, VarDef *vp, EditState *s) {
         type = "string";
         break;
     case VAR_CHARS:
-        snprintf(typebuf, sizeof(typebuf), "char[%d]", vp->size);
+        type = "char";
+        snprintf(typebuf, sizeof(typebuf), "[%d]", vp->size);
         break;
     default:
         type = "var";
         break;
     }
-    len += eb_printf(b, " = ");
+    b->cur_style = QE_STYLE_VARIABLE;
+    len = eb_puts(b, vp->name);
+    b->cur_style = QE_STYLE_DEFAULT;
+    len += eb_puts(b, " = ");
     qe_get_variable(s, vp->name, buf, sizeof(buf), NULL, 1);
     if (*buf == '\"')
         b->cur_style = QE_STYLE_STRING;
@@ -547,21 +551,22 @@ int eb_variable_print_entry(EditBuffer *b, VarDef *vp, EditState *s) {
         b->cur_style = QE_STYLE_NUMBER;
     len += eb_puts(b, buf);
     b->cur_style = QE_STYLE_COMMENT;
-    if (2 + len < 40) {
-        b->tab_width = max_int(2 + len, b->tab_width);
+    if (len + 1 < 40) {
+        b->tab_width = max_int(len + 1, b->tab_width);
         len += eb_putc(b, '\t');
     } else {
         b->tab_width = 40;
     }
-    len += eb_printf(b, "  %s%s %s",
-                     vp->rw ? "" : "read-only ",
-                     var_domain[vp->domain], type);
+    len += eb_printf(b, "  %s%s", vp->rw ? "" : "read-only ",
+                     var_domain[vp->domain]);
+    b->cur_style = QE_STYLE_TYPE;
+    len += eb_printf(b, " %s%s", type, typebuf);
     b->cur_style = QE_STYLE_DEFAULT;
     return len;
 }
 
 int variable_print_entry(CompleteState *cp, EditState *s, const char *name) {
-    VarDef *vp = qe_find_variable(name);
+    VarDef *vp = qe_find_variable(s->qs, name);
     if (vp) {
         // XXX: should pass the target window
         return eb_variable_print_entry(s->b, vp, s);
@@ -571,7 +576,9 @@ int variable_print_entry(CompleteState *cp, EditState *s, const char *name) {
 }
 
 static CompletionDef variable_completion = {
-    "variable", variable_complete, variable_print_entry, command_get_entry
+    .name = "variable",
+    .enumerate = variable_complete,
+    .print_entry = variable_print_entry,
 };
 
 /*---------------- commands ----------------*/
@@ -591,11 +598,11 @@ static const CmdDef var_commands[] = {
           "s{Describe variable: }[variable]|variable|")
 };
 
-static int vars_init(void) {
-    qe_register_variables(var_table, countof(var_table));
-    qe_register_commands(NULL, var_commands, countof(var_commands));
-    qe_register_completion(&variable_completion);
+static int variables_init(QEmacsState *qs) {
+    qe_register_variables(qs, var_table, countof(var_table));
+    qe_register_commands(qs, NULL, var_commands, countof(var_commands));
+    qe_register_completion(qs, &variable_completion);
     return 0;
 }
 
-qe_module_init(vars_init);
+qe_module_init(variables_init);

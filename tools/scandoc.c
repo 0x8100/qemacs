@@ -1,10 +1,26 @@
-/****************************************************************
-;
-;       SCANDOC.C             (C) Copyright Charlie Gordon 2022
-;
-;       Extract documentation from C source files
-;
-;****************************************************************/
+/*
+ * SCANDOC, Extract documentation from C source files
+ *
+ * Copyright (c) 2022-2024 Charlie Gordon.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
 
 /* A simple utility to preprocess C source code to extract
    documentation comments. These comments start with an @ just after
@@ -24,15 +40,56 @@
 #include <string.h>
 
 #define NAME "scandoc"
+#define VERSION  "2024-05-20"
 
 static int verbose;
 
+__attribute__((format(printf, 2, 3)))
+static void fatal(int err, const char *format, ...) {
+    va_list ap;
+    fprintf(stderr, "%s: ", NAME);
+    va_start(ap, format);
+    vfprintf(stderr, format, ap);
+    va_end(ap);
+    if (err)
+        fprintf(stderr, ": %s", strerror(err));
+    fprintf(stderr, "\n");
+    exit(1);
+}
+
+__attribute__((format(printf, 2, 3)))
+static void error(int err, const char *format, ...) {
+    va_list ap;
+    fprintf(stderr, "%s: ", NAME);
+    va_start(ap, format);
+    vfprintf(stderr, format, ap);
+    va_end(ap);
+    if (err)
+        fprintf(stderr, ": %s", strerror(err));
+    fprintf(stderr, "\n");
+}
+
+__attribute__((format(printf, 1, 2)))
+static void warning(const char *format, ...) {
+    va_list ap;
+    fprintf(stderr, "%s: ", NAME);
+    va_start(ap, format);
+    vfprintf(stderr, format, ap);
+    va_end(ap);
+    fprintf(stderr, "\n");
+}
+
 static void *xmalloc(size_t size) {
     void *p = malloc(size);
-    if (!p) {
-        fprintf(stderr, "%s: cannot allocate memory\n", NAME);
-        exit(1);
-    }
+    if (!p)
+        fatal(0, "cannot allocate memory");
+    return p;
+}
+
+static void *xrealloc(void *p, size_t size) {
+    p = realloc(p, size);
+    if (!p)
+        fatal(0, "cannot reallocate memory");
     return p;
 }
 
@@ -44,6 +101,28 @@ static int strstart(const char *str, const char *val, const char **ptr) {
     }
     if (ptr)
         *ptr = &str[i];
+    return 1;
+}
+
+static int match_annotation(const char *str, const char *val, const char **ptr) {
+    if (*str == '@')
+        str++;
+    while (*val) {
+        if (*str == '_' || *str == '-')
+            str++;
+        if (*str != *val)
+            return 0;
+        str++;
+        val++;
+    }
+    if (isalnum((unsigned char)*str))
+        return 0;
+    if (*str == ':')
+        str++;
+    while (isspace((unsigned char)*str))
+        str++;
+    if (ptr)
+        *ptr = str;
     return 1;
 }
 
@@ -147,8 +226,7 @@ static int flush_docs(const char *outname) {
 
     if (outname) {
         if ((ft = fopen(outname, "w")) == NULL) {
-            fprintf(stderr, "%s: cannot open output file %s: %s\n",
-                    NAME, outname, strerror(errno));
+            error(errno, "cannot open output file %s", outname);
             return 1;
         }
     }
@@ -201,6 +279,11 @@ static int skipwhite(const char *s) {
     while (isspace((unsigned char)s[pos]))
         pos++;
     return pos;
+}
+
+static char *trimdup(const char *p) {
+    p += skipwhite(p);
+    return strndup(p, rtrim(p, strlen(p)));
 }
 
 static void freep(char **pp) {
@@ -278,6 +361,47 @@ static int xprintf(char **strp, const char *format, ...)
     return len;
 }
 
+static int xconcat(char **strp, size_t n, const char *s1,
+                   const char *s2, const char *s3)
+{
+    size_t len1 = strlen(s1);
+    size_t len2 = strlen(s2);
+    size_t len3 = strlen(s3);
+    size_t len = n + len1 + len2 + len3;
+    char *res = xmalloc(len + 1);
+    if (n)
+        memcpy(res, *strp, n);
+    memcpy(res + n, s1, len1);
+    memcpy(res + n + len1, s2, len2);
+    memcpy(res + n + len1 + len2, s3, len3 + 1);
+    free(*strp);
+    *strp = res;
+    return len;
+}
+
+static char *load_file(const char *filename) {
+    char *contents;
+    size_t size, len;
+    int c;
+    FILE *fp = fopen(filename, "r");
+    if (fp == NULL)
+        fatal(errno, "cannot include '%s'", filename);
+
+    contents = xmalloc(32);
+    size = 32;
+    len = 0;
+
+    while ((c = getc(fp)) != EOF) {
+        if (len + 1 > size) {
+            size += size / 2 + 32;
+            contents = xrealloc(contents, size);
+        }
+        contents[len++] = (char)c;
+    }
+    contents[len] = '\0';
+    fclose(fp);
+    return contents;
+}
 
 static void add_doc(const char *filename,
                     const char *comment, int lineno,
@@ -334,7 +458,7 @@ static void add_doc(const char *filename,
         /* macro definition */
         char *rep = sec + abbr_len + 1;
         /* store the expansion for the macro name */
-        ap = add_abbrev(sec, abbr_len, rep, -1);
+        ap = add_abbrev(sec, abbr_len, rep, strlen(rep));
         /* remove the macro name and equal sign from the section line */
         xprintf(&sec, "%s", rep);
     } else
@@ -347,6 +471,7 @@ static void add_doc(const char *filename,
         if (!strcmp(ap->abbr, "API") && proto_arg) {
             int pos, epos, elen;
             char *proto;
+            const char *p;
 
             /* skip storage class from prototype */
             strstart(proto_arg, "static ", &proto_arg);
@@ -376,37 +501,48 @@ static void add_doc(const char *filename,
             xprintf(&text, "%*s### `%.*s;`\n\n%s",
                     skipwhite(text), "", pos, proto, text);
 
-            /* should implement more elaborate text reformating */
-            /* handle function macros */
-            const char *p = text;
+            /* TODO: should implement more elaborate text reformating */
+            /* TODO: handle function macros */
+            p = text;
             while ((p = strchr(p, '@')) != NULL) {
                 int offset = p - text;
-                if (strstart(p, "@argument", &p) || strstart(p, "@param", &p)) {
-                    xprintf(&text, "%.*s\n* argument%s", offset, text, p);
+                if (match_annotation(p, "argument", &p) || match_annotation(p, "param", &p)) {
+                    xprintf(&text, "%.*s\n* argument %s", offset, text, p);
                 } else
-                if (strstart(p, "@returns", &p) || strstart(p, "@return", &p)) {
-                    xprintf(&text, "%.*s\nReturn%s", offset, text, p);
+                if (match_annotation(p, "returns", &p) || match_annotation(p, "return", &p)) {
+                    xprintf(&text, "%.*s\nReturn %s", offset, text, p);
                 } else
-                if (strstart(p, "@note:", &p) || strstart(p, "@note", &p)) {
-                    xprintf(&text, "%.*s\nNote:%s", offset, text, p);
+                if (match_annotation(p, "note", &p)) {
+                    xprintf(&text, "%.*s\nNote: %s", offset, text, p);
                 } else
-                if (strstart(p, "@seealso", &p) || strstart(p, "@see_also", &p)) {
-                    xprintf(&text, "%.*s\nSee also:%s", offset, text, p);
+                if (match_annotation(p, "seealso", &p)) {
+                    xprintf(&text, "%.*s\nSee also: %s", offset, text, p);
+                } else {
+                    warning("unknown annotation: %s", p);
                 }
                 p = text + offset + 1;
             }
             free(proto);
-        } else
-        {
+        } else {
+            const char *p = text;
+            while ((p = strchr(p, '@')) != NULL) {
+                int offset = p - text;
+                if (match_annotation(p, "include", &p)) {
+                    char *fname = trimdup(p);
+                    char *contents = load_file(fname);
+                    xconcat(&text, offset, contents, "", "");
+                    free(fname);
+                    free(contents);
+                    break;
+                } else {
+                    warning("unknown annotation: %s", p);
+                }
+            }
         }
     }
 
     /* append section */
-    docs = realloc(docs, (docs_len + 1) * sizeof(*docs));
-    if (!docs) {
-        fprintf(stderr, "%s: cannot allocate memory\n", NAME);
-        exit(1);
-    }
+    docs = xrealloc(docs, (docs_len + 1) * sizeof(*docs));
     dp = &docs[docs_len++];
     dp->section = sec;
     dp->text = text;
@@ -434,6 +570,8 @@ static int scandoc(const char *filename, FILE *fp) {
         p = buf + skipwhite(buf);
         if (in_proto != 1) {
             char *p1 = buf;
+            int p1_len;
+
             if (!strncmp(p, "/*@", 3)) {
                 if (in_comment == 2) {
                     /* flush pending doc comment */
@@ -447,7 +585,7 @@ static int scandoc(const char *filename, FILE *fp) {
                 in_comment = 1;
                 p1 = p;
             }
-            int p1_len = strlen(p1);
+            p1_len = strlen(p1);
             if (in_comment == 1) {
                 char *e = strstr(p1, "*/");
                 if (e) {
@@ -492,27 +630,40 @@ int main(int argc, char *argv[]) {
     char *filename = NULL;
     char *outname = NULL;
     int i;
+    int args_done = 0;
 
     for (i = 1; i < argc; i++) {
         char *arg = argv[i];
-        if (*arg == '-') {
+        if (!args_done && *arg == '-') {
+            if (arg[1] == '\0') {
+                filename = arg;
+                scandoc("<stdin>", stdin);
+                continue;
+            }
             if (arg[1] == '-') {
-                if (!strcmp(arg, "--help"))
+                if (!strcmp(arg, "--")) {
+                    args_done = 1;
+                } else
+                if (!strcmp(arg, "--help")) {
                     goto usage;
-                fprintf(stderr, "%s: bad option: -%s\n", NAME, arg);
-                return 1;
+                } else
+                if (!strcmp(arg, "--version")) {
+                    printf("%s version %s\n", NAME, VERSION);
+                    return 1;
+                } else {
+                    warning("bad option: -%s", arg);
+                    return 1;
+                }
             }
             while (*++arg) {
                 switch (*arg) {
                 case 'h':
                 case '?':
-                usage:
-                    printf("usage: %s [-v] [-o FILENAME] [FILE] ...\n", NAME);
-                    return 2;
+                    goto usage;
                 case 'o':
                     outname = arg[1] ? arg + 1 : argv[++i];
                     if (!outname) {
-                        fprintf(stderr, "%s: missing filename for -o\n", NAME);
+                        warning("missing filename for -o");
                         return 1;
                     }
                     break;
@@ -520,7 +671,7 @@ int main(int argc, char *argv[]) {
                     verbose++;
                     continue;
                 default:
-                    fprintf(stderr, "%s: bad option: %s\n", NAME, arg);
+                    warning("bad option: %s", arg);
                     return 1;
                 }
                 break;
@@ -529,8 +680,7 @@ int main(int argc, char *argv[]) {
             FILE *fp;
             filename = arg;
             if ((fp = fopen(filename, "r")) == NULL) {
-                fprintf(stderr, "%s: cannot open input file %s: %s\n",
-                        NAME, filename, strerror(errno));
+                error(errno, "cannot open input file %s", filename);
                 return 1;
             }
             scandoc(filename, fp);
@@ -538,7 +688,9 @@ int main(int argc, char *argv[]) {
         }
     }
     if (!filename) {
-        scandoc("<stdin>", stdin);
+    usage:
+        printf("usage: %s [-v] [-o FILENAME] FILE ...\n", NAME);
+        return 2;
     }
     /* output the documentation to outname or stdout */
     flush_docs(outname);

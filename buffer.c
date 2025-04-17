@@ -2,7 +2,7 @@
  * Buffer handling for QEmacs
  *
  * Copyright (c) 2000-2002 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -65,7 +65,7 @@ static void update_page(Page *p)
 
     /* if the page is read only, copy it */
     if (p->flags & PG_READ_ONLY) {
-        buf = qe_malloc_dup(p->data, p->size);
+        buf = qe_malloc_dup_bytes(p->data, p->size);
         /* XXX: should return an error */
         if (!buf)
             return;
@@ -180,7 +180,8 @@ static void eb_insert1(EditBuffer *b, int page_index, const u8 *buf, int size)
         if (len > 0) {
             update_page(p);
             /* CG: probably faster with qe_malloc + qe_free */
-            qe_realloc(&p->data, p->size + len);
+            // XXX: test for failure
+            qe_realloc_bytes(&p->data, p->size + len);
             memmove(p->data + len, p->data, p->size);
             memcpy(p->data, buf + size - len, len);
             size -= len;
@@ -192,7 +193,8 @@ static void eb_insert1(EditBuffer *b, int page_index, const u8 *buf, int size)
     n = (size + MAX_PAGE_SIZE - 1) / MAX_PAGE_SIZE;
     if (n > 0) {
         b->nb_pages += n;
-        qe_realloc(&b->page_table, b->nb_pages * sizeof(Page));
+        // XXX: test for failure
+        qe_realloc_array(&b->page_table, b->nb_pages);
         p = &b->page_table[page_index];
         blockmove(p + n, p, b->nb_pages - n - page_index);
         while (size > 0) {
@@ -200,7 +202,7 @@ static void eb_insert1(EditBuffer *b, int page_index, const u8 *buf, int size)
             if (len > MAX_PAGE_SIZE)
                 len = MAX_PAGE_SIZE;
             p->size = len;
-            p->data = qe_malloc_dup(buf, len);
+            p->data = qe_malloc_dup_bytes(buf, len);
             p->flags = 0;
             buf += len;
             size -= len;
@@ -240,7 +242,8 @@ static void eb_insert_lowlevel(EditBuffer *b, int offset,
                 update_page(p - 1);
                 update_page(p);
                 chunk = min_offset(MAX_PAGE_SIZE - p[-1].size, offset);
-                qe_realloc(&p[-1].data, p[-1].size + chunk);
+                // XXX: test for failure
+                qe_realloc_bytes(&p[-1].data, p[-1].size + chunk);
                 memcpy(p[-1].data + p[-1].size, p->data, chunk);
                 p[-1].size += chunk;
                 p->size -= chunk;
@@ -249,13 +252,15 @@ static void eb_insert_lowlevel(EditBuffer *b, int offset,
                     b->nb_pages -= 1;
                     qe_free(&p->data);
                     blockmove(p, p + 1, b->nb_pages - page_index);
-                    qe_realloc(&b->page_table, b->nb_pages * sizeof(Page));
+                    // XXX: test for failure
+                    qe_realloc_array(&b->page_table, b->nb_pages);
                     p = b->page_table + page_index - 1;
                     offset = p->size;
                     goto retry;
                 }
                 memmove(p->data, p->data + chunk, p->size);
-                qe_realloc(&p->data, p->size);
+                // XXX: test for failure
+                qe_realloc_bytes(&p->data, p->size);
                 offset -= chunk;
                 if (offset == 0 && p[-1].size < MAX_PAGE_SIZE) {
                     /* restart from previous page */
@@ -276,7 +281,8 @@ static void eb_insert_lowlevel(EditBuffer *b, int offset,
             p = b->page_table + page_index;
             update_page(p);
             p->size += len - len_out;
-            qe_realloc(&p->data, p->size);
+            // XXX: test for failure
+            qe_realloc_bytes(&p->data, p->size);
             memmove(p->data + offset + len,
                     p->data + offset, p->size - (offset + len));
             memcpy(p->data + offset, buf, len);
@@ -382,7 +388,8 @@ int eb_insert_buffer(EditBuffer *dest, int dest_offset,
                realloced */
             q = dest->page_table + page_index - 1;
             update_page(q);
-            qe_realloc(&q->data, dest_offset);
+            // XXX: test for failure
+            qe_realloc_bytes(&q->data, dest_offset);
             q->size = dest_offset;
         }
     } else {
@@ -403,7 +410,8 @@ int eb_insert_buffer(EditBuffer *dest, int dest_offset,
     if (n > 0) {
         /* add the pages */
         dest->nb_pages += n;
-        qe_realloc(&dest->page_table, dest->nb_pages * sizeof(Page));
+        // XXX: test for failure
+        qe_realloc_array(&dest->page_table, dest->nb_pages);
         q = dest->page_table + page_index;
         blockmove(q + n, q, dest->nb_pages - n - page_index);
         p = p_start;
@@ -417,7 +425,7 @@ int eb_insert_buffer(EditBuffer *dest, int dest_offset,
             } else {
                 /* allocate a new page */
                 q->flags = 0;
-                q->data = qe_malloc_dup(p->data, len);
+                q->data = qe_malloc_dup_bytes(p->data, len);
             }
             n--;
             p++;
@@ -506,7 +514,8 @@ int eb_delete(EditBuffer *b, int offset, int size)
             memmove(p->data + offset, p->data + offset + len,
                     p->size - offset - len);
             p->size -= len;
-            qe_realloc(&p->data, p->size);
+            // XXX: test for failure
+            qe_realloc_bytes(&p->data, p->size);
             offset += len;
             /* XXX: should merge with adjacent pages if size becomes small? */
             if (offset >= p->size) {
@@ -522,7 +531,8 @@ int eb_delete(EditBuffer *b, int offset, int size)
         b->nb_pages -= n;
         blockmove(del_start, del_start + n,
                   b->page_table + b->nb_pages - del_start);
-        qe_realloc(&b->page_table, b->nb_pages * sizeof(Page));
+        // XXX: test for failure
+        qe_realloc_array(&b->page_table, b->nb_pages);
     }
 
     /* the page cache is no longer valid */
@@ -536,22 +546,24 @@ int eb_delete(EditBuffer *b, int offset, int size)
 /* Verify that window still exists, return argument or NULL,
  * update handle if window is invalid.
  */
-EditBuffer *check_buffer(EditBuffer **sp)
+EditBuffer *qe_check_buffer(QEmacsState *qs, EditBuffer **sp)
 {
-    QEmacsState *qs = &qe_state;
+    EditBuffer *b0 = *sp;
     EditBuffer *b;
 
+    if (b0 == NULL)
+        return NULL;
+
     for (b = qs->first_buffer; b != NULL; b = b->next) {
-        if (b == *sp)
+        if (b == b0)
             return b;
     }
     return *sp = NULL;
 }
 
 #ifdef CONFIG_TINY
-EditBuffer *eb_find(const char *name)
+EditBuffer *qe_find_buffer_name(QEmacsState *qs, const char *name)
 {
-    QEmacsState *qs = &qe_state;
     EditBuffer *b;
 
     b = qs->first_buffer;
@@ -587,7 +599,7 @@ static int eb_cache_locate(EditBuffer **cache, int len, const char *name)
 
 static int eb_cache_remove(EditBuffer *b)
 {
-    QEmacsState *qs = &qe_state;
+    QEmacsState *qs = b->qs;
     EditBuffer **cache = qs->buffer_cache;
     int len = qs->buffer_cache_len;
     int pos = eb_cache_locate(cache, len, b->name);
@@ -606,7 +618,7 @@ static int eb_cache_remove(EditBuffer *b)
 
 static int eb_cache_insert(EditBuffer *b)
 {
-    QEmacsState *qs = &qe_state;
+    QEmacsState *qs = b->qs;
     EditBuffer **cache = qs->buffer_cache;
     int len = qs->buffer_cache_len;
     int pos = eb_cache_locate(cache, len, b->name);
@@ -616,7 +628,7 @@ static int eb_cache_insert(EditBuffer *b)
 
     if (len >= qs->buffer_cache_size) {
         int size = max_int(32, len + (len >> 1) + (len >> 3));
-        cache = qe_realloc(&qs->buffer_cache, size * sizeof(*cache));
+        cache = qe_realloc_array(&qs->buffer_cache, size);
         if (!cache)
             return -1;
         qs->buffer_cache_size = size;
@@ -629,9 +641,8 @@ static int eb_cache_insert(EditBuffer *b)
     return 0;
 }
 
-EditBuffer *eb_find(const char *name)
+EditBuffer *qe_find_buffer_name(QEmacsState *qs, const char *name)
 {
-    QEmacsState *qs = &qe_state;
     EditBuffer **cache = qs->buffer_cache;
     int len = qs->buffer_cache_len;
     int pos = eb_cache_locate(cache, len, name);
@@ -646,6 +657,7 @@ EditBuffer *eb_find(const char *name)
 /* flush the log */
 void eb_free_log_buffer(EditBuffer *b)
 {
+    // FIXME: what if log buffer is shown in a window?
     eb_free(&b->log_buffer);
     b->log_new_index = 0;
     b->log_current = 0;
@@ -671,7 +683,7 @@ int eb_set_buffer_name(EditBuffer *b, const char *name1)
     }
     n = 0;
     /* do not allow an empty name */
-    while ((b1 = eb_find(name)) != NULL || *name == '\0') {
+    while ((b1 = qe_find_buffer_name(b->qs, name)) != NULL || *name == '\0') {
         if (b == b1)
             return 0;
         n++;
@@ -684,22 +696,28 @@ int eb_set_buffer_name(EditBuffer *b, const char *name1)
     return eb_cache_insert(b);
 }
 
-EditBuffer *eb_new(const char *name, int flags)
+EditBuffer *qe_new_buffer(QEmacsState *qs, const char *name, int flags)
 {
-    QEmacsState *qs = &qe_state;
     EditBuffer *b;
     EditBuffer **pb;
 
-    b = qe_mallocz(EditBuffer);
-    if (!b)
-        return NULL;
+    if (flags & BC_REUSE) {
+        b = qe_find_buffer_name(qs, name);
+        if (b != NULL) {
+            if (flags & BC_CLEAR)
+                eb_clear(b);
+            return b;
+        }
+    }
+    flags &= ~(BC_REUSE | BC_CLEAR);
 
-    /* set the buffer name to a unique name */
-    if (eb_set_buffer_name(b, name)) {
-        qe_free(&b);
+    b = qe_mallocz(EditBuffer);
+    if (!b) {
+        qe_put_error(qs, "Out of memory for buffer '%s'", name);
         return NULL;
     }
 
+    b->qs = qs;
     b->flags = flags & ~BF_STYLES;
 
     /* set default data type */
@@ -712,6 +730,16 @@ EditBuffer *eb_new(const char *name, int flags)
     b->tab_width = qs->default_tab_width;
     b->fill_column = qs->default_fill_column;
     b->eol_type = qs->default_eol_type;
+
+    /* set the buffer name to a unique name */
+    // XXX: `b` is not in the buffer list nor in the buffer cache
+    //      `eb_set_buffer_name` will insert it into the cache.
+    //      This is somewhat sloppy.
+    if (eb_set_buffer_name(b, name)) {
+        qe_put_error(qs, "Cannot set buffer name '%s'", name);
+        qe_free(&b);
+        return NULL;
+    }
 
     /* add buffer in global buffer list (at end for system buffers) */
     pb = &qs->first_buffer;
@@ -738,18 +766,6 @@ EditBuffer *eb_new(const char *name, int flags)
 
     if (flags & BF_STYLES)
         eb_create_style_buffer(b, flags);
-
-    return b;
-}
-
-/* Return an empty scratch buffer, create one if necessary */
-EditBuffer *eb_scratch(const char *name, int flags)
-{
-    EditBuffer *b;
-
-    b = eb_find_new(name, flags);
-    if (b != NULL)
-        eb_clear(b);
 
     return b;
 }
@@ -783,7 +799,7 @@ void eb_free(EditBuffer **bp)
 {
     if (*bp) {
         EditBuffer *b = *bp;
-        QEmacsState *qs = &qe_state;
+        QEmacsState *qs = b->qs;
         EditBuffer **pb;
         EditBuffer *b1;
 
@@ -806,6 +822,10 @@ void eb_free(EditBuffer **bp)
 
         eb_delete_properties(b, 0, INT_MAX);
         eb_cache_remove(b);
+        /* eb_clear frees b->log_buffer.
+         * it should also call eb_free_style_buffer(b)
+         * and eb_delete_properties(b, 0, INT_MAX);
+         */
         eb_clear(b);
 
         /* suppress from buffer list */
@@ -826,34 +846,32 @@ void eb_free(EditBuffer **bp)
         if (b == qs->trace_buffer)
             qs->trace_buffer = NULL;
 
+        if (b->flags & BF_SYSTEM) {
+            int i;
+            for (i = 0; i < NB_YANK_BUFFERS; i++) {
+                if (qs->yank_buffers[i] == b)
+                    qs->yank_buffers[i] = NULL;
+            }
+        }
+
         eb_free_style_buffer(b);
 
         qe_free(&b->saved_data);
-        qe_free(bp);
+        // XXX: cannot use qe_free(bp) because *bp may have been set to NULL
+        //      already, eg: eb_free_log_buffer() and eb_free_style_buffer()
+        qe_free(&b);
+        *bp = NULL;
     }
 }
 
-EditBuffer *eb_find_new(const char *name, int flags)
+EditBuffer *qe_find_buffer_filename(QEmacsState *qs, const char *filename)
 {
     EditBuffer *b;
 
-    b = eb_find(name);
-    if (!b)
-        b = eb_new(name, flags);
-    return b;
-}
-
-EditBuffer *eb_find_file(const char *filename)
-{
-    QEmacsState *qs = &qe_state;
-    EditBuffer *b;
-
-    b = qs->first_buffer;
-    while (b != NULL) {
+    for (b = qs->first_buffer; b != NULL; b = b->next) {
         /* XXX: should also use stat to ensure this is same file */
         if (strequal(b->filename, filename))
             return b;
-        b = b->next;
     }
     return NULL;
 }
@@ -861,19 +879,20 @@ EditBuffer *eb_find_file(const char *filename)
 /* Find a window attached to a given buffer, different from s */
 EditState *eb_find_window(EditBuffer *b, EditState *s)
 {
-    QEmacsState *qs = &qe_state;
     EditState *e;
 
-    for (e = qs->first_window; e != NULL; e = e->next_window) {
+    if (!b)
+        return NULL;
+
+    for (e = b->qs->first_window; e != NULL; e = e->next_window) {
         if (e != s && e->b == b)
             break;
     }
     return e;
 }
 
-void eb_trace_bytes(const void *buf, int size, int state)
+void qe_trace_bytes(QEmacsState *qs, const void *buf, int size, int state)
 {
-    QEmacsState *qs = &qe_state;
     EditBuffer *b = qs->trace_buffer;
     EditState *e;
     const char *str = NULL;
@@ -907,43 +926,26 @@ void eb_trace_bytes(const void *buf, int size, int state)
         col = 0;
     }
     if (col == 0 || prev_state != state) {
+        size_t i;
         qs->trace_buffer_state = state;
-        switch (state) {
-        case EB_TRACE_TTY:
-            str = "tty";
-            break;
-        case EB_TRACE_KEY:
-            str = "key";
-            break;
-        case EB_TRACE_PTY:
-            str = "pty";
-            break;
-        case EB_TRACE_SHELL:
-            str = "shell";
-            break;
-        case EB_TRACE_EMULATE:
-            str = "emulate";
-            break;
-        case EB_TRACE_DEBUG:
-            str = "debug";
-            break;
-        case EB_TRACE_COMMAND:
-            str = "command";
-            break;
+        for (i = 0; i < qe_trace_defs_count; i++) {
+            if (state == qe_trace_defs[i].flags) {
+                str = qe_trace_defs[i].name;
+                break;
+            }
         }
         if (str) {
             int len1 = (int)strlen(str);
             int width = (col == 0 ? 7 :
-                         col <= 20 ? 27 - col :
-                         col <= 40 ? 47 - col : len1 + 2);
+                         col <= 24 ? 31 - col :
+                         col <= 52 ? 59 - col : len1 + 2);
             col += eb_printf(b, "%*s: ", width, str);
         }
     }
     p0 = buf;
     endp = p0 + size;
 
-#define MAX_TRACE_WIDTH  76
-    // XXX: should encode into a local buffer by chunks
+#define MAX_TRACE_WIDTH  98
     for (p = p0; p0 < endp; p++) {
         while (p >= endp || *p < 32 || *p >= 127 || *p == '\\') {
             if (p0 >= endp)
@@ -1039,14 +1041,16 @@ void eb_offset_callback(qe__unused__ EditBuffer *b, void *opaque, int edge,
 int eb_create_style_buffer(EditBuffer *b, int flags)
 {
     if (b->b_styles) {
-        /* XXX: should extend style width if needed */
+        /* FIXME: should extend style width if needed */
         return 0;
     } else {
         char name[MAX_BUFFERNAME_SIZE];
         snprintf(name, sizeof(name), "*S<%.*s>", MAX_BUFFERNAME_SIZE - 5, b->name);
-        b->b_styles = eb_new(name, BF_SYSTEM | BF_IS_STYLE | BF_RAW);
+        b->b_styles = qe_new_buffer(b->qs, name, BF_SYSTEM | BF_IS_STYLE | BF_RAW);
+        if (!b->b_styles)
+            return -1;
         b->flags |= flags & BF_STYLES;
-        b->style_shift = ((unsigned)(flags & BF_STYLES) / BF_STYLE1) - 1;
+        b->style_shift = (((unsigned)flags & BF_STYLES) / BF_STYLE1) - 1;
         b->style_bytes = 1 << b->style_shift;
         eb_set_style(b, 0, LOGOP_INSERT, 0, b->total_size);
         eb_add_callback(b, eb_style_callback, NULL, 0);
@@ -1056,6 +1060,7 @@ int eb_create_style_buffer(EditBuffer *b, int flags)
 
 void eb_free_style_buffer(EditBuffer *b)
 {
+    // FIXME: what if style buffer is shown in a window?
     eb_free(&b->b_styles);
     b->style_shift = b->style_bytes = 0;
     eb_free_callback(b, eb_style_callback, NULL);
@@ -1160,7 +1165,7 @@ static void eb_addlog(EditBuffer *b, enum LogOperation op,
          * referenced by name.
          */
         snprintf(buf, sizeof(buf), "*L<%.*s>", MAX_BUFFERNAME_SIZE - 5, b->name);
-        b->log_buffer = eb_new(buf, BF_SYSTEM | BF_IS_LOG | BF_RAW);
+        b->log_buffer = qe_new_buffer(b->qs, buf, BF_SYSTEM | BF_IS_LOG | BF_RAW);
         if (!b->log_buffer)
             return;
         b->log_new_index = 0;
@@ -1235,21 +1240,23 @@ static void eb_addlog(EditBuffer *b, enum LogOperation op,
 
 void do_undo(EditState *s)
 {
+    QEmacsState *qs = s->qs;
     EditBuffer *b = s->b;
     int log_index, size_trailer;
     LogBuffer lb;
 
     if (!b->log_buffer) {
-        put_status(s, "No undo information");
+        put_error(s, "No undo information");
         return;
     }
 
-    /* deactivate region hilite */
+    /* deactivate region hilite and multi-cursor */
     s->region_style = 0;
+    s->multi_cursor_active = 0;
 
     /* Should actually keep undo state current until new logs are added */
-    if (s->qe_state->last_cmd_func != (CmdFunc)do_undo
-    &&  s->qe_state->last_cmd_func != (CmdFunc)do_redo) {
+    if (qs->last_cmd_func != (CmdFunc)do_undo
+    &&  qs->last_cmd_func != (CmdFunc)do_redo) {
         b->log_current = 0;
     }
 
@@ -1259,11 +1266,18 @@ void do_undo(EditState *s)
         log_index = b->log_current - 1;
     }
     if (log_index == 0) {
-        put_status(s, "No further undo information");
+        put_error(s, "No further undo information");
         return;
     } else {
         put_status(s, "Undo!");
     }
+    if (!qs->first_transient_key
+    &&  (qs->last_key == 'u' || qs->last_key == 'u')) {
+        put_status(s, "Repeat with 'u', 'r'");
+        qe_register_transient_binding(qs, "undo", "u");
+        qe_register_transient_binding(qs, "redo", "r");
+    }
+
     /* go backward */
     log_index -= sizeof(int);
     eb_read(b->log_buffer, log_index, &size_trailer, sizeof(int));
@@ -1317,7 +1331,7 @@ void do_redo(EditState *s)
     LogBuffer lb;
 
     if (!b->log_buffer) {
-        put_status(s, "No undo information");
+        put_error(s, "No undo information");
         return;
     }
 
@@ -1325,13 +1339,13 @@ void do_redo(EditState *s)
     s->region_style = 0;
 
     /* Should actually keep undo state current until new logs are added */
-    if (s->qe_state->last_cmd_func != (CmdFunc)do_undo
-    &&  s->qe_state->last_cmd_func != (CmdFunc)do_redo) {
+    if (s->qs->last_cmd_func != (CmdFunc)do_undo
+    &&  s->qs->last_cmd_func != (CmdFunc)do_redo) {
         b->log_current = 0;
     }
 
     if (!b->log_current || !b->log_new_index) {
-        put_status(s, "Nothing to redo");
+        put_error(s, "Nothing to redo");
         return;
     }
     put_status(s, "Redo!");
@@ -1520,6 +1534,14 @@ QETermStyle eb_get_style(EditBuffer *b, int offset)
  */
 int eb_skip_chars(EditBuffer *b, int offset, int n)
 {
+    /*@API buffer
+       Compute offset after moving `n` codepoints from `offset`.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @argument `n` the number of codepoints to skip forward or backward
+       @return the new buffer position
+       @note 'n' can be negative
+     */
     for (; n < 0 && offset > 0; n++) {
         offset = eb_prev(b, offset);
     }
@@ -1529,21 +1551,39 @@ int eb_skip_chars(EditBuffer *b, int offset, int n)
     return offset;
 }
 
-/* delete one character at offset 'offset', return number of bytes removed */
 int eb_delete_char32(EditBuffer *b, int offset) {
+    /*@API buffer
+       Delete one character at offset `offset`, return number of bytes removed
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @return the number of bytes removed
+     */
     return eb_delete_range(b, offset, eb_next(b, offset));
 }
 
-/* return the offset past any pending combining glyphs */
 int eb_skip_accents(EditBuffer *b, int offset) {
+    /*@API buffer
+       Skip over combining glyphs
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @return the new buffer position past any combining glyphs
+     */
     int offset1;
     while (qe_isaccent(eb_nextc(b, offset, &offset1)))
         offset = offset1;
     return offset;
 }
 
-/* return the main character for the next glyph, update offset to next_ptr */
 char32_t eb_next_glyph(EditBuffer *b, int offset, int *next_ptr) {
+    /*@API buffer
+       Read the main character for the next glyph,
+       update offset to next_ptr
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @argument `next_ptr` a pointer to a variable for the updated
+       buffer position after the codepoint and any combining glyphs
+       @return the main codepoint value
+     */
     char32_t c = eb_nextc(b, offset, &offset);
     if (c >= ' ') {
         offset += eb_skip_accents(b, offset);
@@ -1552,8 +1592,16 @@ char32_t eb_next_glyph(EditBuffer *b, int offset, int *next_ptr) {
     return c;
 }
 
-/* return the main character for the previous glyph, update offset to next_ptr */
 char32_t eb_prev_glyph(EditBuffer *b, int offset, int *next_ptr) {
+    /*@API buffer
+       Return the main character for the previous glyph,
+       update offset to next_ptr
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @argument `next_ptr` a pointer to a variable for the updated
+       buffer position of the codepoint before any combining glyphs
+       @return the main codepoint value
+     */
     for (;;) {
         char32_t c = eb_prevc(b, offset, &offset);
         if (!qe_isaccent(c)) {
@@ -1683,6 +1731,8 @@ int eb_goto_pos(EditBuffer *b, int line1, int col1)
     offset = 0;
 
     p = b->page_table;
+    if (!p)
+        return 0;
     p_end = b->page_table + b->nb_pages;
     while (p < p_end) {
         if (!(p->flags & PG_VALID_POS)) {
@@ -1727,6 +1777,8 @@ int eb_get_pos(EditBuffer *b, int *line_ptr, int *col_ptr, int offset)
     line = 0;
     col = 0;
     p = b->page_table;
+    if (!p)
+        goto the_end;
     p_end = p + b->nb_pages;
     for (;;) {
         if (p >= p_end)
@@ -1987,7 +2039,7 @@ int eb_raw_buffer_load1(EditBuffer *b, FILE *f, int offset)
     unsigned char buf[IOBUF_SIZE];
     int len, size, inserted;
 
-    //put_status(NULL, "loading %s", filename);
+    //put_status(b->qs->active_window, "Loading %s", filename);
     size = inserted = 0;
     for (;;) {
         len = fread(buf, 1, IOBUF_SIZE, f);
@@ -2000,7 +2052,7 @@ int eb_raw_buffer_load1(EditBuffer *b, FILE *f, int offset)
         offset += len;
         size += len;
     }
-    //put_status(NULL, "");
+    //put_status(b->qs->active_window, "");
     return size;
 }
 
@@ -2026,7 +2078,7 @@ int eb_mmap_buffer(EditBuffer *b, const char *filename)
     if (fd < 0)
         return -1;
     file_size = lseek(fd, 0, SEEK_END);
-    //put_status(NULL, "mapping %s", filename);
+    //put_status(b->qs->active_window, "Mapping %s", filename);
     file_ptr = mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
     if ((void*)file_ptr == MAP_FAILED) {
         close(fd);
@@ -2059,14 +2111,13 @@ int eb_mmap_buffer(EditBuffer *b, const char *filename)
     }
     // XXX: not needed
     b->map_handle = fd;
-    //put_status(NULL, "");
+    //put_status(b->qs->active_window, "");
     return 0;
 }
 #endif
 
 static int raw_buffer_load(EditBuffer *b, FILE *f)
 {
-    QEmacsState *qs = &qe_state;
     struct stat st;
 
     /* TODO: Should produce error messages */
@@ -2075,12 +2126,12 @@ static int raw_buffer_load(EditBuffer *b, FILE *f)
         return -1;
 
 #ifdef CONFIG_MMAP
-    if (st.st_size >= qs->mmap_threshold) {
+    if (st.st_size >= b->qs->mmap_threshold) {
         if (!eb_mmap_buffer(b, b->filename))
             return 0;
     }
 #endif
-    if (st.st_size <= qs->max_load_size) {
+    if (st.st_size <= b->qs->max_load_size) {
         return eb_raw_buffer_load1(b, f, 0);
     }
     return -1;
@@ -2099,7 +2150,7 @@ static int raw_buffer_save(EditBuffer *b, int start, int end,
     if (fd < 0)
         return -1;
 
-    //put_status(NULL, "writing %s", filename);
+    //put_status(b->qs->active_window, "Writing %s", filename);
     if (end < start) {
         int tmp = start;
         start = end;
@@ -2126,7 +2177,7 @@ static int raw_buffer_save(EditBuffer *b, int start, int end,
         size -= len;
     }
     close(fd);
-    //put_status(NULL, "");
+    //put_status(b->qs->active_window, "");
     return written;
 }
 
@@ -2279,6 +2330,18 @@ int eb_match_str_utf8(EditBuffer *b, int offset, const char *str, int *offsetp) 
     return 1;
 }
 
+int eb_match_str_utf8_reverse(EditBuffer *b, int offset, const char *str, int pos, int *offsetp) {
+    const char *p = str + pos;
+    while (p > str) {
+        char32_t c = utf8_decode_prev(&p, str);
+        if (eb_prevc(b, offset, &offset) != c)
+            return 0;
+    }
+    if (offsetp)
+        *offsetp = offset;
+    return 1;
+}
+
 int eb_match_istr_utf8(EditBuffer *b, int offset, const char *str, int *offsetp) {
     const char *p = str;
 
@@ -2321,11 +2384,7 @@ int eb_vprintf(EditBuffer *b, const char *fmt, va_list ap) {
     va_end(ap2);
     if (len >= size) {
         size = len + 1;
-#ifdef CONFIG_WIN32
         buf = qe_malloc_bytes(size);
-#else
-        buf = alloca(size);
-#endif
         vsnprintf(buf, size, fmt, ap);
     }
     /* CG: insert buf encoding according to b->charset and b->eol_type.
@@ -2333,10 +2392,8 @@ int eb_vprintf(EditBuffer *b, const char *fmt, va_list ap) {
      * XXX: %c does not encode non ASCII characters as utf8.
      */
     written = eb_insert_utf8_buf(b, b->offset, buf, len);
-#ifdef CONFIG_WIN32
     if (buf != buf0)
         qe_free(&buf);
-#endif
     return written;
 }
 
@@ -2437,7 +2494,9 @@ int eb_insert_buffer_convert(EditBuffer *dest, int dest_offset,
         b = dest;
         if (!styles_flags
         &&  ((b->flags & BF_SAVELOG) || dest_offset != b->total_size)) {
-            b = eb_new("*tmp*", BF_SYSTEM);
+            b = qe_new_buffer(b->qs, "*tmp*", BF_SYSTEM);
+            if (!b)
+                return 0;
             eb_set_charset(b, dest->charset, dest->eol_type);
             offset1 = 0;
         }
@@ -2464,28 +2523,40 @@ int eb_insert_buffer_convert(EditBuffer *dest, int dest_offset,
     }
 }
 
-/* Get the line starting at offset `offset` as an array of code points.
- * `offset` is bumped to point to the first unread character.
- * Returns `len` >= 0 and < buf_size, the offset into the destination
- * of the end of the line, either the '\n' or the final '\0'.
- * Truncation can be detected by checking if buf[len] is '\n'.
- */
 int eb_get_line(EditBuffer *b, char32_t *buf, int size,
                 int offset, int *offset_ptr)
 {
+    /*@API buffer
+       Get contents of the line starting at offset `offset` as an array of
+       code points. `offset` is bumped to point to the first unread character.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `buf` a valid pointer to the destination array
+       @argument `size` the length of the destination array
+       @argument `offset` the offset in bytes of the beginning of the line in
+       the buffer
+       @argument `offset_ptr` a pointer to a variable to receive the offset
+       of the first unread character in the buffer.
+       @returns the number of codepoints stored into the destination array
+       before the newline if any.
+       @note: the return value `len` verifies `len >= 0` and `len < buf_size`.
+       If a complete line was read, `buf[len] == '\n'` and `buf[len + 1] == '\0'`.
+       Truncation can be detected by checking `buf[len] != '\n'` or `len < buf_size - 1`.
+     */
     int len = 0;
-    char32_t c;
 
     if (size > 0) {
         for (;;) {
+            int next;
+            char32_t c = eb_nextc(b, offset, &next);
             if (len + 1 >= size) {
                 buf[len] = '\0';
                 break;
             }
-            c = eb_nextc(b, offset, &offset);
             buf[len++] = c;
+            offset = next;
             if (c == '\n') {
-                /* add null terminator but return offset of newline */
+                /* end of line: offset points to the beginning of the next line */
+                /* adjust return value for easy stripping and truncation test */
                 buf[len--] = '\0';
                 break;
             }
@@ -2493,39 +2564,76 @@ int eb_get_line(EditBuffer *b, char32_t *buf, int size,
     }
     if (offset_ptr)
         *offset_ptr = offset;
-
     return len;
 }
 
-/* Get the line starting at offset `offset` encoded in UTF-8.
- * `offset` is bumped to point to the first unread character.
- * Returns `len` >= 0 and < buf_size, the offset into the destination
- * of the end of the line, either the '\n' or the final '\0'.
- * Truncation can be detected by checking if buf[len] is '\n'.
- */
-int eb_fgets(EditBuffer *b, char *buf, int buf_size,
+int eb_get_line_length(EditBuffer *b, int offset, int *offset_ptr)
+{
+    /*@API buffer
+       Get the length in codepoints of the line starting at offset `offset`
+       as an number of code points. `offset` is bumped to point to the first
+       character after the newline.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the offset in bytes of the beginning of the line in
+       the buffer
+       @argument `offset_ptr` a pointer to a variable to receive the offset
+       of the first unread character in the buffer.
+       @returns the number of codepoints in the line including the newline if any.
+     */
+    int len = 0;
+
+    while (eb_nextc(b, offset, &offset) != '\n') {
+        len++;
+    }
+    if (offset_ptr)
+        *offset_ptr = offset;
+    return len;
+}
+
+int eb_fgets(EditBuffer *b, char *buf, int size,
              int offset, int *offset_ptr)
 {
+    /*@API buffer
+       Get the contents of the line starting at offset `offset` encoded
+       in UTF-8. `offset` is bumped to point to the first unread character.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `buf` a valid pointer to the destination array
+       @argument `size` the length of the destination array
+       @argument `offset` the offset in bytes of the beginning of the line in
+       the buffer
+       @argument `offset_ptr` a pointer to a variable to receive the offset
+       of the first unread character in the buffer.
+       @returns the number of bytes stored into the destination array before
+       the newline if any. No partial encoding is stored into the array.
+       @note: the return value `len` verifies `len >= 0` and `len < buf_size`.
+       If a complete line was read, `buf[len] == '\n'` and `buf[len + 1] == '\0'`.
+       Truncation can be detected by checking `buf[len] != '\n'` or `len < buf_size - 1`.
+     */
+    int len = 0;
     buf_t outbuf, *out;
 
-    out = buf_init(&outbuf, buf, buf_size);
-    for (;;) {
-        int next;
-        char32_t c = eb_nextc(b, offset, &next);
-        if (!buf_putc_utf8(out, c)) {
-            /* truncation: offset points to the first unread character */
-            break;
+    if (size > 0) {
+        out = buf_init(&outbuf, buf, size);
+        for (;;) {
+            int next;
+            char32_t c = eb_nextc(b, offset, &next);
+            if (!buf_putc_utf8(out, c)) {
+                /* truncation: offset points to the first unread character */
+                break;
+            }
+            offset = next;
+            if (c == '\n') {
+                /* end of line: offset points to the beginning of the next line */
+                /* adjust return value for easy stripping and truncation test */
+                out->len--;
+                break;
+            }
         }
-        offset = next;
-        if (c == '\n') {
-            /* end of line: offset points to the beginning of the next line */
-            /* adjust return value for easy stripping and truncation test */
-            out->len--;
-            break;
-        }
+        len = out->len;
     }
-    *offset_ptr = offset;
-    return out->len;
+    if (offset_ptr)
+        *offset_ptr = offset;
+    return len;
 }
 
 int eb_prev_line(EditBuffer *b, int offset)
@@ -2658,21 +2766,10 @@ void eb_add_property(EditBuffer *b, int offset, int type, void *data) {
         eb_add_callback(b, eb_plist_callback, NULL, 0);
     }
 
+    /* insert property in ascending order of offset */
     for (pp = &b->property_list; (p = *pp) != NULL; pp = &(*pp)->next) {
-        if (p->offset >= offset) {
-            if (p->offset == offset) {
-                if (p->type == type && type == QE_PROP_TAG) {
-                    /* prevent tag duplicates */
-                    if (strequal(p->data, data)) {
-                        if (type & QE_PROP_FREE)
-                            qe_free(&data);
-                        return;
-                    }
-                }
-                continue;
-            }
+        if (p->offset > offset)
             break;
-        }
     }
 
     p = qe_mallocz(QEProperty);
@@ -2681,6 +2778,17 @@ void eb_add_property(EditBuffer *b, int offset, int type, void *data) {
     p->data = data;
     p->next = *pp;
     *pp = p;
+}
+
+void eb_add_tag(EditBuffer *b, int offset, const char *s) {
+    QEProperty *p;
+
+    /* prevent tag duplicates */
+    for (p = b->property_list; p != NULL; p = p->next) {
+        if (p->offset == offset && p->type == QE_PROP_TAG && strequal(p->data, s))
+            return;
+    }
+    eb_add_property(b, offset, QE_PROP_TAG, qe_strdup(s));
 }
 
 QEProperty *eb_find_property(EditBuffer *b, int offset, int offset2, int type) {
@@ -2720,9 +2828,8 @@ void eb_delete_properties(EditBuffer *b, int offset, int offset2) {
 
 /* buffer data type handling */
 
-void eb_register_data_type(EditBufferDataType *bdt)
+void qe_register_data_type(QEmacsState *qs, EditBufferDataType *bdt)
 {
-    QEmacsState *qs = &qe_state;
     EditBufferDataType **lp;
 
     lp = &qs->first_buffer_data_type;
@@ -2748,7 +2855,6 @@ int eb_write_buffer(EditBuffer *b, int start, int end, const char *filename)
  */
 int eb_save_buffer(EditBuffer *b)
 {
-    QEmacsState *qs = &qe_state;
     int ret, st_mode;
     char buf1[MAX_FILENAME_SIZE];
     const char *filename;
@@ -2764,7 +2870,7 @@ int eb_save_buffer(EditBuffer *b)
         st_mode = st.st_mode & 0777;
 
 #ifndef FORCE_PROHIBIT_BACKUP
-    if (!qs->backup_inhibited
+    if (!b->qs->backup_inhibited
     &&  strlen(filename) < MAX_FILENAME_SIZE - 1) {
         /* backup old file if present */
         if (snprintf(buf1, sizeof(buf1), "%s~", filename) < ssizeof(buf1)) {
@@ -2808,7 +2914,7 @@ EditBufferDataType raw_data_type = {
 };
 
 /* init buffer handling */
-void eb_init(void)
+void qe_data_init(QEmacsState *qs)
 {
-    eb_register_data_type(&raw_data_type);
+    qe_register_data_type(qs, &raw_data_type);
 }

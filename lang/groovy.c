@@ -218,7 +218,8 @@ error:
 }
 
 static void groovy_colorize_line(QEColorizeContext *cp,
-                                 char32_t *str, int n, ModeDef *syn)
+                                 const char32_t *str, int n,
+                                 QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start = i, style, klen, haslower;
     char32_t c, sep = 0;
@@ -264,8 +265,7 @@ static void groovy_colorize_line(QEColorizeContext *cp,
             continue;
 
         case '~':
-            while (qe_isblank(str[i]))
-                i++;
+            i = cp_skip_blanks(str, i, n);
             if (str[i] == '/') {
                 /* parse slashy string as regex */
                 sep = '/';
@@ -438,12 +438,12 @@ static void groovy_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
     /* set style on eol char */
-    SET_COLOR1(str, n, style);
+    SET_STYLE1(sbuf, n, style);
 
     cp->colorize_state = state;
 }
@@ -461,10 +461,9 @@ static ModeDef groovy_mode = {
     .fallback = &c_mode,
 };
 
-static int groovy_init(void)
+static int groovy_init(QEmacsState *qs)
 {
-    qe_register_mode(&groovy_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &groovy_mode, MODEF_SYNTAX);
     return 0;
 }
 

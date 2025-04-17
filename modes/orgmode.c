@@ -2,7 +2,7 @@
  * Org mode for QEmacs.
  *
  * Copyright (c) 2001-2002 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2024 Charlie Gordon.
  * Copyright (c) 2014 Francois Revol.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -103,7 +103,8 @@ static int org_scan_chunk(const char32_t *str,
 }
 
 static void org_colorize_line(QEColorizeContext *cp,
-                              char32_t *str, int n, ModeDef *syn)
+                              const char32_t *str, int n,
+                              QETermStyle *sbuf, ModeDef *syn)
 {
     int colstate = cp->colorize_state;
     int i = 0, j = 0, kw, base_style = 0, has_space;
@@ -117,7 +118,7 @@ static void org_colorize_line(QEColorizeContext *cp,
             if (colstate & IN_ORG_LISP) {
                 colstate &= ~(IN_ORG_LISP | IN_ORG_BLOCK);
                 cp->colorize_state = colstate;
-                lisp_mode.colorize_func(cp, str, n, &lisp_mode);
+                cp_colorize_line(cp, str, 0, n, sbuf, &lisp_mode);
                 colstate = cp->colorize_state;
                 colstate |= IN_ORG_LISP | IN_ORG_BLOCK;
             }
@@ -133,13 +134,13 @@ static void org_colorize_line(QEColorizeContext *cp,
 
         if (str[j] == ' ') {
             base_style = OrgBulletStyles[(j - i - 1) % BULLET_STYLES];
-            SET_COLOR(str, i, j + 1, base_style);
+            SET_STYLE(sbuf, i, j + 1, base_style);
             i = j + 1;
 
             kw = org_todo_keyword(str + i);
             if (kw > -1) {
                 j = i + strlen(OrgTodoKeywords[kw].keyword) + 1;
-                SET_COLOR(str, i, j, OrgTodoKeywords[kw].style);
+                SET_STYLE(sbuf, i, j, OrgTodoKeywords[kw].style);
                 i = j;
             }
         }
@@ -149,7 +150,7 @@ static void org_colorize_line(QEColorizeContext *cp,
 
         if (str[i] == '#') {
             if (str[i + 1] == ' ') {  /* [ \t]*[#][ ] -> comment */
-                SET_COLOR(str, i, n, ORG_STYLE_COMMENT);
+                SET_STYLE(sbuf, i, n, ORG_STYLE_COMMENT);
                 i = n;
             } else
             if (str[i + 1] == '+') {  /* [ \t]*[#][+] -> metadata */
@@ -164,18 +165,18 @@ static void org_colorize_line(QEColorizeContext *cp,
                         colstate |= IN_ORG_LISP;
                     }
                 }
-                SET_COLOR(str, i, n, ORG_STYLE_PREPROCESS);
+                SET_STYLE(sbuf, i, n, ORG_STYLE_PREPROCESS);
                 i = n;
             }
         } else
         if (str[i] == ':') {
             if (str[i + 1] == ' ') {
                 /* code snipplet, should use code colorizer */
-                SET_COLOR(str, i, n, ORG_STYLE_CODE);
+                SET_STYLE(sbuf, i, n, ORG_STYLE_CODE);
                 i = n;
             } else {
                 /* property */
-                SET_COLOR(str, i, n, ORG_STYLE_PROPERTY);
+                SET_STYLE(sbuf, i, n, ORG_STYLE_PROPERTY);
                 i = n;
             }
         } else
@@ -233,7 +234,7 @@ static void org_colorize_line(QEColorizeContext *cp,
                 break;
             case '\\':  /* TeX syntax: \keyword \- \[ \] \( \) */
                 if (str[i + 1] == '\\') {  /* \\ escape */
-                    SET_COLOR(str, i, i + 2, base_style);
+                    SET_STYLE(sbuf, i, i + 2, base_style);
                     i += 2;
                     continue;
                 }
@@ -278,10 +279,10 @@ static void org_colorize_line(QEColorizeContext *cp,
             has_space = (str[i] == ' ');
         }
         if (chunk) {
-            SET_COLOR(str, i, i + chunk, ORG_STYLE_EMPHASIS);
+            SET_STYLE(sbuf, i, i + chunk, ORG_STYLE_EMPHASIS);
             i += chunk;
         } else {
-            SET_COLOR1(str, i, base_style);
+            SET_STYLE1(sbuf, i, base_style);
             i++;
         }
     }
@@ -319,7 +320,7 @@ static int org_find_heading(EditState *s, int offset, int *level, int silent)
         offset = eb_prev_line(s->b, offset);
     }
     if (!silent)
-        put_status(s, "Before first heading");
+        put_error(s, "Before first heading");
 
     return -1;
 }
@@ -393,7 +394,7 @@ static void do_outline_up_heading(EditState *s)
         return;
 
     if (level <= 1) {
-        put_status(s, "Already at top level of the outline");
+        put_error(s, "Already at top level of the outline");
         return;
     }
 
@@ -410,7 +411,7 @@ static void do_org_backward_same_level(EditState *s)
 
     offset = org_prev_heading(s, offset, level, &level1);
     if (level1 != level) {
-        put_status(s, "No previous same-level heading");
+        put_error(s, "No previous same-level heading");
         return;
     }
     s->offset = offset;
@@ -426,7 +427,7 @@ static void do_org_forward_same_level(EditState *s)
 
     offset = org_next_heading(s, offset, level, &level1);
     if (level1 != level) {
-        put_status(s, "No following same-level heading");
+        put_error(s, "No following same-level heading");
         return;
     }
     s->offset = offset;
@@ -450,7 +451,7 @@ static void do_org_goto(EditState *s, const char *dest)
         for (; nb > 0; nb--) {
             offset = org_next_heading(s, offset, level, &level1);
             if (level != level1) {
-                put_status(s, "Heading not found");
+                put_error(s, "Heading not found");
                 return;
             }
         }
@@ -461,7 +462,7 @@ static void do_org_goto(EditState *s, const char *dest)
 
 static void do_org_mark_element(EditState *s, int subtree)
 {
-    QEmacsState *qs = s->qe_state;
+    QEmacsState *qs = s->qs;
     int offset, offset1, level;
 
     offset = org_find_heading(s, s->offset, &level, 0);
@@ -476,7 +477,7 @@ static void do_org_mark_element(EditState *s, int subtree)
 
     s->offset = offset1;
     /* activate region hilite */
-    if (s->qe_state->hilite_region)
+    if (s->qs->hilite_region)
         s->region_style = QE_STYLE_REGION_HILITE;
 }
 
@@ -571,7 +572,7 @@ static void do_org_promote(EditState *s, int dir)
         if (level > 1)
             eb_delete_char32(s->b, offset);
         else
-            put_status(s, "Cannot promote to level 0");
+            put_error(s, "Cannot promote to level 0");
     }
 }
 
@@ -594,7 +595,7 @@ static void do_org_promote_subtree(EditState *s, int dir)
             if (level > 1) {
                 eb_delete_char32(s->b, offset);
             } else {
-                put_status(s, "Cannot promote to level 0");
+                put_error(s, "Cannot promote to level 0");
                 return;
             }
         }
@@ -613,7 +614,7 @@ static void do_org_move_subtree(EditState *s, int dir)
         return;
 
     if (!org_is_header_line(s, s->offset)) {
-        put_status(s, "Not on header line");
+        put_error(s, "Not on header line");
         return;
     }
 
@@ -627,17 +628,20 @@ static void do_org_move_subtree(EditState *s, int dir)
     if (dir < 0) {
         offset2 = org_prev_heading(s, offset, level, &level2);
         if (level2 < level) {
-            put_status(s, "Cannot move substree");
+            put_error(s, "Cannot move substree");
             return;
         }
     } else {
         if (offset1 == s->b->total_size || level1 < level) {
-            put_status(s, "Cannot move substree");
+            put_error(s, "Cannot move substree");
             return;
         }
         offset2 = org_next_heading(s, offset1, level, &level2);
     }
-    b1 = eb_new("*tmp*", BF_SYSTEM | (s->b->flags & BF_STYLES));
+    // XXX: should have a way to move buffer contents
+    b1 = qe_new_buffer(s->qs, "*tmp*", BF_SYSTEM | (s->b->flags & BF_STYLES));
+    if (!b1)
+        return;
     eb_set_charset(b1, s->b->charset, s->b->eol_type);
     eb_insert_buffer_convert(b1, 0, s->b, offset, size);
     eb_delete(s->b, offset, size);
@@ -717,7 +721,7 @@ static const CmdDef org_commands[] = {
     CMD3( "org-insert-todo-heading", "", /* actually M-S-RET and C-c C-x M */
           "",
           do_org_insert_heading, ESi, "*" "v", 1)
-    CMD3( "org-insert-heading-respect-content", "C-j", /* actually C-RET */
+    CMD3( "org-insert-heading-respect-content", "C-j, C-RET", /* actually C-RET */
           "",
           do_org_insert_heading, ESi, "*" "v", 2)
     CMD3( "org-insert-todo-heading-respect-content", "", /* actually C-S-RET */
@@ -764,10 +768,10 @@ static ModeDef org_mode = {
     .colorize_func = org_colorize_line,
 };
 
-static int org_init(void)
+static int org_init(QEmacsState *qs)
 {
-    qe_register_mode(&org_mode, MODEF_SYNTAX);
-    qe_register_commands(&org_mode, org_commands, countof(org_commands));
+    qe_register_mode(qs, &org_mode, MODEF_SYNTAX);
+    qe_register_commands(qs, &org_mode, org_commands, countof(org_commands));
 
     return 0;
 }

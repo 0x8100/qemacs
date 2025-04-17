@@ -27,28 +27,51 @@
 #include "clang.h"
 
 /* C mode options */
+#define CLANG_C_TYPES     0x00080   /* add C types to syn->types list */
+#define CLANG_C_KEYWORDS  0x00100   /* add C keywords to syn->keywords list */
 #define CLANG_LEX         0x00200
 #define CLANG_YACC        0x00400
-#define CLANG_REGEX       0x00800
-#define CLANG_WLITERALS   0x01000
-#define CLANG_PREPROC     0x02000
-#define CLANG_CAP_TYPE    0x04000  /* Mixed case initial cap is type */
-#define CLANG_STR3        0x08000  /* Support """strings""" */
-#define CLANG_LINECONT    0x10000  /* support \<newline> as line continuation */
+#define CLANG_REGEX       0x00800   /* recognize / delimited regular expressions */
+#define CLANG_WLITERALS   0x01000   /* recognize L, u, U, u8 string prefix */
+#define CLANG_PREPROC     0x02000   /* colorize preprocessing directives */
+#define CLANG_CAP_TYPE    0x04000   /* Mixed case initial cap is type */
+#define CLANG_STR3        0x08000   /* Support """strings""" */
+#define CLANG_LINECONT    0x10000   /* support \<newline> as line continuation */
 #define CLANG_NEST_COMMENTS  0x20000  /* block comments are nested */
-#define CLANG_CC          0x13100  /* all C language features */
+#define CLANG_T_TYPES     0x40000   /* _t suffix indicates type identifier */
+
+/* FIXME: need flags for
+   '@' in identifiers(start / next),
+   '$' in identifiers(start / next),
+   '-' in identifiers next
+   '#' as comment char
+   UnicodeIDStart and UnicodeIDContinue in identifiers
+ */
+
+/* all C language features */
+#define CLANG_CC          (CLANG_LINECONT | CLANG_WLITERALS | CLANG_PREPROC | \
+                           CLANG_C_KEYWORDS | CLANG_C_TYPES | CLANG_T_TYPES)
 
 static const char c_keywords[] = {
     "auto|break|case|const|continue|default|do|else|enum|extern|for|goto|"
     "if|inline|register|restrict|return|sizeof|static|struct|switch|"
     "typedef|union|volatile|while|"
     /* C99 and C11 keywords */
-    "_Alignas|_Alignof|_Atomic|_Generic|_Noreturn|_Static_assert|_Thread_local|"
+    "_Alignas|_Alignof|_Atomic|_Generic|_Noreturn|_Pragma|"
+    "_Static_assert|_Thread_local|"
+    /* C2x keywords */
+    "alignas|alignof|static_assert|thread_local|"
+    "constexpr|false|nullptr|true|typeof|typeof_unqual"
 };
 
 static const char c_types[] = {
-    "char|double|float|int|long|unsigned|short|signed|void|va_list|"
-    "_Bool|_Complex|_Imaginary|FILE|"
+    "char|double|float|int|long|unsigned|short|signed|void|"
+    /* common types */
+    "FILE|va_list|jmp_buf|"
+    /* C99 and C11 types */
+    "_Bool|_Complex|_Imaginary|bool|complex|imaginary|"
+    /* C2x types */
+    "_BitInt|_Decimal128|_Decimal32|_Decimal64|"
 };
 
 static const char c_extensions[] = {
@@ -61,53 +84,84 @@ static const char c_extensions[] = {
     "h.in|c.in|"        /* preprocessed C input (should use more generic approach) */
 };
 
-/* grab a C identifier from a uint buf, return char count. */
-int get_c_identifier(char *buf, int buf_size, const char32_t *p, int flavor) {
-    char32_t c;
-    int i, j;
-
-    i = j = 0;
-    c = p[i];
-    if (qe_isalpha_(c)
-    ||  c == '$'
-    ||  (c == '@' && flavor != CLANG_PIKE)
-    ||  (flavor == CLANG_RUST && c >= 128)) {
-        for (;;) {
-            if (j < buf_size - 1) {
-                /* XXX: UTF-8 bug */
-                buf[j++] = (c < 0xFF) ? c : 0xFF;
-            }
-            i++;
-            c = p[i];
-            if (c == '-' && flavor == CLANG_CSS)
-                continue;
-            if (qe_isalnum_(c))
-                continue;
-            if (flavor == CLANG_RUST && c >= 128)
-                continue;
-            if (c == ':' && p[i + 1] == ':'
-            &&  flavor == CLANG_CPP
-            &&  qe_isalpha_(p[i + 2])) {
-                if (j < buf_size - 2) {
-                    buf[j++] = c;
-                    buf[j++] = c;
-                }
-                i += 2;
-                c = p[i];
-                continue;
-            }
-            break;
-        }
-    }
-    buf[j] = '\0';
-    return i;
+static int is_c_identifier_start(char32_t c, int flavor) {
+    // should accept unicode escape sequence, UnicodeIDStart
+    return (qe_isalpha_(c)
+        ||  c == '$'
+        ||  (c == '@' && flavor != CLANG_PIKE)
+        ||  (flavor == CLANG_RUST && c >= 128));
 }
 
-static int qe_haslower(const char *str) {
-    while (*str) {
-        if (qe_islower(*str++)) return 1;
+static int is_c_identifier_part(char32_t c, int flavor) {
+    // should accept unicode escape sequence, UnicodeIDContinue, ZWJ or ZWNJ
+    return (qe_isalnum_(c)
+        ||  (c == '-' && flavor == CLANG_CSS)
+        ||  (flavor == CLANG_RUST && c >= 128));
+}
+
+// FIXME: should merge into ustr_get_identifier()
+int get_c_identifier(char *dest, int size, char32_t c,
+                     const char32_t *str, int i0, int n, int flavor)
+{
+    /*@API utils
+       Grab an identifier from a `char32_t` buffer for a given C flavor,
+       accept non-ASCII identifiers and encode in UTF-8.
+       @argument `dest` a pointer to the destination array
+       @argument `size` the length of the destination array in bytes
+       @argument `c` the initial code point or `0` if none
+       @argument `str` a valid pointer to an array of codepoints
+       @argument `i` the index to the next codepoint
+       @argument `n` the length of the codepoint array
+       @argument `flavor` the language variant for identifier syntax
+       @return the number of codepoints used in the source array.
+       @note `dest` can be a null pointer if `size` is `0`.
+     */
+    int pos = 0, i = i0;
+
+    if (c == 0) {
+        if (!(i < n && is_c_identifier_start(c = str[i++], flavor))) {
+            if (size > 0)
+                *dest = '\0';
+            return 0;
+        }
     }
-    return 0;
+    for (;; i++) {
+        if (c < 128) {
+            if (pos + 1 < size) {
+                dest[pos++] = c;
+            }
+        } else {
+            char buf[6];
+            int len = utf8_encode(buf, c);
+            if (pos + len < size) {
+                memcpy(dest + pos, buf, len);
+                pos += len;
+            } else {
+                size = pos + 1;
+            }
+        }
+        if (i >= n)
+            break;
+        c = str[i];
+        if (!is_c_identifier_part(c, flavor)) {
+            /* include ugly c++ :: separator in identifier */
+            if (c == ':' && str[i + 1] == ':'
+            &&  (flavor == CLANG_CPP || flavor == CLANG_C3)
+            &&  is_c_identifier_start(str[i + 2], flavor)) {
+                if (pos + 1 < size)
+                    dest[pos++] = ':';
+                if (pos + 1 < size)
+                    dest[pos++] = ':';
+                i += 2;
+                c = str[i];
+            } else {
+                break;
+            }
+        }
+    }
+    if (pos < size)
+        dest[pos] = '\0';
+    return i - i0;
 }
 
 enum {
@@ -146,19 +200,18 @@ enum {
 };
 
 static void c_colorize_line(QEColorizeContext *cp,
-                            char32_t *str, int n, ModeDef *syn)
+                            const char32_t *str, int n,
+                            QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start, i1, i2, indent, level;
-    int style, style0, style1, type_decl, klen, tag;
-    char32_t c, prev, delim;
+    int style, style0, style1, type_decl, tag;
+    char32_t c, delim;
     char kbuf[64];
     int mode_flags = syn->colorize_flags;
     int flavor = (mode_flags & CLANG_FLAVOR);
     int state = cp->colorize_state;
 
-    for (indent = 0; qe_isblank(str[indent]); indent++)
-        continue;
-
+    indent = cp_skip_blanks(str, 0, n);
     tag = !indent && cp->s->mode == syn;
     start = i;
     type_decl = 0;
@@ -195,15 +248,26 @@ static void c_colorize_line(QEColorizeContext *cp,
 
     while (i < n) {
         start = i;
+    reswitch:
         c = str[i++];
-
         switch (c) {
+        case '*':
+            /* lone star at the beginning of a line in a shell buffer
+             * is treated as a comment start.  This improves colorization
+             * of diff and git output.
+             */
+            if (start == indent && cp->partial_file
+            &&  (i == n || str[i] == ' ' || str[i] == '/')) {
+                i--;
+                goto parse_comment2;
+            }
+            break;
         case '/':
             if (str[i] == '*') {
                 /* C style multi-line comment */
                 i++;
-                state |= IN_C_COMMENT2;
             parse_comment2:
+                state |= IN_C_COMMENT2;
                 style = C_STYLE_COMMENT;
                 level = (state & IN_C_COMMENT_LEVEL) >> IN_C_COMMENT_SHIFT;
                 while (i < n) {
@@ -225,7 +289,7 @@ static void c_colorize_line(QEColorizeContext *cp,
                 }
                 state = (state & ~IN_C_COMMENT_LEVEL) |
                         (min_int(level, 7) << IN_C_COMMENT_SHIFT);
-                SET_COLOR(str, start, i, C_STYLE_COMMENT);
+                SET_STYLE(sbuf, start, i, C_STYLE_COMMENT);
                 continue;
             } else
             if (str[i] == '/') {
@@ -236,7 +300,7 @@ static void c_colorize_line(QEColorizeContext *cp,
                 if (str[n - 1] != '\\')
                     state &= ~IN_C_COMMENT1;
                 i = n;
-                SET_COLOR(str, start, i, C_STYLE_COMMENT);
+                SET_STYLE(sbuf, start, i, C_STYLE_COMMENT);
                 continue;
             }
             if (flavor == CLANG_D && (str[i] == '+')) {
@@ -265,55 +329,60 @@ static void c_colorize_line(QEColorizeContext *cp,
                 }
                 state = (state & ~IN_C_COMMENT_LEVEL) |
                         (min_int(level, 7) << IN_C_COMMENT_SHIFT);
-                SET_COLOR(str, start, i, C_STYLE_COMMENT);
+                SET_STYLE(sbuf, start, i, C_STYLE_COMMENT);
                 continue;
             }
-            /* XXX: should use more context to tell regex from divide */
-            prev = ' ';
-            for (i1 = start; i1 > indent; ) {
-                prev = str[--i1] & CHAR_MASK;
-                if (!qe_isblank(prev))
+            if (mode_flags & CLANG_REGEX) {
+                /* XXX: should use more context to tell regex from divide */
+                char32_t prev = ' ';
+                for (i1 = start; i1 > indent; ) {
+                    prev = str[--i1];
+                    if (!qe_isblank(prev))
+                        break;
+                }
+                /* ignore end of comment in grep output */
+                if (start > indent && str[start - 1] == '*' && cp->partial_file)
                     break;
-            }
-            if ((mode_flags & CLANG_REGEX)
-            &&  !qe_findchar("])", prev)
-            &&  (qe_findchar(" [({},;=<>!~^&|*/%?:", prev)
-            ||   (str[i1] >> STYLE_SHIFT) == C_STYLE_KEYWORD
-            ||   (str[i] != ' ' && (str[i] != '=' || str[i + 1] != ' ')
-            &&    !(qe_isalnum(prev) || prev == ')')))) {
-                /* parse regex */
-                state |= IN_C_REGEX;
-                delim = '/';
-            parse_regex:
-                style = C_STYLE_REGEX;
-                while (i < n) {
-                    c = str[i++];
-                    if (c == '\\') {
-                        if (i < n) {
-                            i += 1;
-                        }
-                    } else
-                    if (state & IN_C_CHARCLASS) {
-                        if (c == ']') {
-                            state &= ~IN_C_CHARCLASS;
-                        }
-                        /* ECMA 5: ignore '/' inside char classes */
-                    } else {
-                        if (c == '[') {
-                            state |= IN_C_CHARCLASS;
-                        } else
-                        if (c == delim) {
-                            while (qe_isalnum_(str[i])) {
-                                i++;
+
+                if (!qe_findchar("])", prev)
+                &&  (qe_findchar(" [({},;=<>!~^&|*/%?:", prev)
+                ||   sbuf[i1] == C_STYLE_KEYWORD
+                ||   (str[i] != ' ' && (str[i] != '=' || str[i + 1] != ' ')
+                &&    !(qe_isalnum(prev) || prev == ')')))) {
+                    /* parse regex */
+                    state |= IN_C_REGEX;
+                    delim = '/';
+                parse_regex:
+                    style = C_STYLE_REGEX;
+                    while (i < n) {
+                        c = str[i++];
+                        if (c == '\\') {
+                            if (i < n) {
+                                i += 1;
                             }
-                            state &= ~IN_C_REGEX;
-                            style = style0;
-                            break;
+                        } else
+                        if (state & IN_C_CHARCLASS) {
+                            if (c == ']') {
+                                state &= ~IN_C_CHARCLASS;
+                            }
+                            /* ECMA 5: ignore '/' inside char classes */
+                        } else {
+                            if (c == '[') {
+                                state |= IN_C_CHARCLASS;
+                            } else
+                            if (c == delim) {
+                                while (qe_isalnum_(str[i])) {
+                                    i++;
+                                }
+                                state &= ~IN_C_REGEX;
+                                style = style0;
+                                break;
+                            }
                         }
                     }
+                    SET_STYLE(sbuf, start, i, C_STYLE_REGEX);
+                    continue;
                 }
-                SET_COLOR(str, start, i, C_STYLE_REGEX);
-                continue;
             }
             break;
         case '%':
@@ -326,17 +395,8 @@ static void c_colorize_line(QEColorizeContext *cp,
                 /* recognize a shebang comment line */
                 style = style0 = C_STYLE_PREPROCESS;
                 i = n;
-                SET_COLOR(str, start, i, C_STYLE_PREPROCESS);
+                SET_STYLE(sbuf, start, i, C_STYLE_PREPROCESS);
                 break;
-            }
-            if (mode_flags & CLANG_PREPROC) {
-                state |= IN_C_PREPROCESS;
-                style = style0 = C_STYLE_PREPROCESS;
-            }
-            if (flavor == CLANG_D) {
-                /* only #line is supported, but can occur anywhere */
-                state |= IN_C_PREPROCESS;
-                style = style0 = C_STYLE_PREPROCESS;
             }
             if (flavor == CLANG_AWK || flavor == CLANG_PHP
             ||  flavor == CLANG_LIMBO || flavor == CLANG_SQUIRREL) {
@@ -347,32 +407,38 @@ static void c_colorize_line(QEColorizeContext *cp,
                 goto parse_regex;
             }
             if (flavor == CLANG_HAXE || flavor == CLANG_CBANG) {
-                i += get_c_identifier(kbuf, countof(kbuf), str + i, flavor);
+                i += get_c_identifier(kbuf, countof(kbuf), 0, str, i, n, flavor);
                 // XXX: check for proper preprocessor directive?
-                SET_COLOR(str, start, i, C_STYLE_PREPROCESS);
+                SET_STYLE(sbuf, start, i, C_STYLE_PREPROCESS);
                 continue;
             }
             if (flavor == CLANG_PIKE) {
+                int klen;
                 if (str[i] == '\"') {
                     i++;
-                    goto parse_string;
+                    goto parse_string; // FIXME: accept embedded newlines
                 }
+                if (str[i] == '(') {
+                    // FIXME: parse literal strings until `#)`
+                }
+                if (str[i] == '[') {
+                    // FIXME: parse literal strings until `#]`
+                }
+                if (str[i] == '{') {
+                    // FIXME: parse literal strings until `#}`
+                }
+                if (ustr_match_keyword(str + i, "string", &klen)) {
+                    /* Pike's version of #embed */
+                    style = C_STYLE_PREPROCESS;
+                    i += klen;
+                    break;
+                }
+            }
+            if (mode_flags & CLANG_PREPROC) {
                 state |= IN_C_PREPROCESS;
                 style = style0 = C_STYLE_PREPROCESS;
             }
             break;
-        case 'L':       /* wide character and string literals */
-            if (mode_flags & CLANG_WLITERALS) {
-                if (str[i] == '\'') {
-                    i++;
-                    goto parse_string_q;
-                }
-                if (str[i] == '\"') {
-                    i++;
-                    goto parse_string;
-                }
-            }
-            goto normal;
         // case 'r':
             /* XXX: D language r" wysiwyg chars " */
         // case 'X':
@@ -389,6 +455,7 @@ static void c_colorize_line(QEColorizeContext *cp,
             delim = '\'';
             goto string;
         case '`':
+            // FIXME: Support `operator in Pike
             if (flavor == CLANG_SCALA || flavor == CLANG_GMSCRIPT) {
                 /* scala quoted identifier */
                 while (i < n) {
@@ -396,7 +463,7 @@ static void c_colorize_line(QEColorizeContext *cp,
                     if (c == '`')
                         break;
                 }
-                SET_COLOR(str, start, i, C_STYLE_VARIABLE);
+                SET_STYLE(sbuf, start, i, C_STYLE_VARIABLE);
                 continue;
             }
             if (flavor == CLANG_GO || flavor == CLANG_D) {
@@ -414,7 +481,7 @@ static void c_colorize_line(QEColorizeContext *cp,
                 }
                 if (state & IN_C_PREPROCESS)
                     style1 = C_STYLE_PREPROCESS;
-                SET_COLOR(str, start, i, style1);
+                SET_STYLE(sbuf, start, i, style1);
                 continue;
             }
             break;
@@ -429,9 +496,9 @@ static void c_colorize_line(QEColorizeContext *cp,
                     /* ignore escape sequences and newlines */
                     state |= IN_C_STRING_D;   // XXX: IN_RAW_STRING
                     style1 = C_STYLE_STRING;
-                    delim = str[i];
+                    delim = str[i++];
                     style = style1;
-                    for (i++; i < n;) {
+                    while (i < n) {
                         c = str[i++];
                         if (c == delim) {
                             if (str[i] == c) {
@@ -443,7 +510,7 @@ static void c_colorize_line(QEColorizeContext *cp,
                             break;
                         }
                     }
-                    SET_COLOR(str, start, i, style1);
+                    SET_STYLE(sbuf, start, i, style1);
                     continue;
                 }
             }
@@ -452,7 +519,7 @@ static void c_colorize_line(QEColorizeContext *cp,
                 while (qe_isalnum_(str[i]) || str[i] == '.')
                     i++;
                 if (start == 0 || str[start - 1] != '.')
-                    SET_COLOR(str, start, i, C_STYLE_PREPROCESS);
+                    SET_STYLE(sbuf, start, i, C_STYLE_PREPROCESS);
                 continue;
             }
             goto normal;
@@ -479,7 +546,7 @@ static void c_colorize_line(QEColorizeContext *cp,
                         break;
                     }
                 }
-                SET_COLOR(str, start, i, style1);
+                SET_STYLE(sbuf, start, i, style1);
                 continue;
             }
         parse_string:
@@ -512,7 +579,7 @@ static void c_colorize_line(QEColorizeContext *cp,
             }
             if (state & IN_C_PREPROCESS)
                 style1 = C_STYLE_PREPROCESS;
-            SET_COLOR(str, start, i, style1);
+            SET_STYLE(sbuf, start, i, style1);
             continue;
         case '=':
             /* exit type declaration */
@@ -550,41 +617,38 @@ static void c_colorize_line(QEColorizeContext *cp,
                 ||     (str[i] == '.' && str[i + 1] != '.')) {
                     i++;
                 }
-                SET_COLOR(str, start, i, C_STYLE_NUMBER);
+                SET_STYLE(sbuf, start, i, C_STYLE_NUMBER);
                 continue;
             }
-            if (qe_isalpha_(c) || c == '$' || (c == '@' && flavor != CLANG_PIKE)) {
-                /* XXX: should support :: */
-                klen = get_c_identifier(kbuf, countof(kbuf), str + start, flavor);
-                i = start + klen;
-
+            if (is_c_identifier_start(c, flavor)) {
+                i += get_c_identifier(kbuf, countof(kbuf), c, str, i, n, flavor);
+                if (str[i] == '\'' || str[i] == '\"') {
+                    /* check for encoding prefix */
+                    if ((mode_flags & CLANG_WLITERALS) && strfind("L|u|U|u8", kbuf))
+                        goto reswitch;
+                }
                 if (strfind(syn->keywords, kbuf)
-                ||  ((mode_flags & CLANG_CC) && strfind(c_keywords, kbuf))
+                ||  ((mode_flags & CLANG_C_KEYWORDS) && strfind(c_keywords, kbuf))
                 ||  ((flavor == CLANG_CSS) && str[i] == ':')) {
-                    SET_COLOR(str, start, i, C_STYLE_KEYWORD);
+                    SET_STYLE(sbuf, start, i, C_STYLE_KEYWORD);
                     continue;
                 }
 
-                i1 = i;
-                while (qe_isblank(str[i1]))
-                    i1++;
+                i1 = cp_skip_blanks(str, i, n);
                 i2 = i1;
                 while (str[i2] == '*' || qe_isblank(str[i2]))
                     i2++;
 
                 if (tag && qe_findchar("({[,;=", str[i1])) {
-                    eb_add_property(cp->b, cp->offset + start,
-                                    QE_PROP_TAG, qe_strdup(kbuf));
+                    eb_add_tag(cp->b, cp->offset + start, kbuf);
                 }
 
                 if ((start == 0 || str[start - 1] != '.')
                 &&  (!qe_findchar(".(:", str[i]) || flavor == CLANG_PIKE)
-                &&  (strfind(syn->types, kbuf)
-                ||   ((mode_flags & CLANG_CC) && strfind(c_types, kbuf))
-                ||   (((mode_flags & CLANG_CC) || (flavor == CLANG_D)) &&
-                     strend(kbuf, "_t", NULL))
-                ||   ((mode_flags & CLANG_CAP_TYPE) &&
-                      qe_isupper(c) && qe_haslower(kbuf))
+                &&  (sreg_match(syn->types, kbuf, 1)
+                ||   ((mode_flags & CLANG_C_TYPES) && strfind(c_types, kbuf))
+                ||   ((mode_flags & CLANG_T_TYPES) && strend(kbuf, "_t", NULL))
+                ||   ((mode_flags & CLANG_CAP_TYPE) && qe_isupper(c) && qe_haslower(kbuf))
                 ||   (flavor == CLANG_HAXE && qe_isupper(c) && qe_haslower(kbuf) &&
                       (start == 0 || !qe_findchar("(", str[start - 1]))))) {
                     /* if not cast, assume type declaration */
@@ -596,13 +660,13 @@ static void c_colorize_line(QEColorizeContext *cp,
                         /* function style cast */
                         style1 = C_STYLE_FUNCTION; //C_STYLE_KEYWORD;
                     }
-                    SET_COLOR(str, start, i, style1);
+                    SET_STYLE(sbuf, start, i, style1);
                     continue;
                 }
                 if (str[i1] == '(') {
                     /* function call */
                     /* XXX: different styles for call and definition */
-                    SET_COLOR(str, start, i, C_STYLE_FUNCTION);
+                    SET_STYLE(sbuf, start, i, C_STYLE_FUNCTION);
                     continue;
                 }
                 if ((mode_flags & CLANG_CC) || flavor == CLANG_JAVA) {
@@ -613,9 +677,9 @@ static void c_colorize_line(QEColorizeContext *cp,
                     if (type_decl) {
                         if (start == 0) {
                             /* assume type if first column */
-                            SET_COLOR(str, start, i, C_STYLE_TYPE);
+                            SET_STYLE(sbuf, start, i, C_STYLE_TYPE);
                         } else {
-                            SET_COLOR(str, start, i, C_STYLE_VARIABLE);
+                            SET_STYLE(sbuf, start, i, C_STYLE_VARIABLE);
                         }
                     }
                 }
@@ -623,17 +687,17 @@ static void c_colorize_line(QEColorizeContext *cp,
             }
             break;
         }
-        SET_COLOR1(str, start, style);
+        SET_STYLE1(sbuf, start, style);
     }
  the_end:
     if (state & (IN_C_COMMENT | IN_C_PREPROCESS | IN_C_STRING)) {
         /* set style on eol char */
-        SET_COLOR1(str, n, style);
+        SET_STYLE1(sbuf, n, style);
     }
 
     /* strip state if not overflowing from a comment */
     if (!(state & IN_C_COMMENT) &&
-        (!(mode_flags & CLANG_LINECONT) || n <= 0 || (str[n - 1] & CHAR_MASK) != '\\')) {
+        (!(mode_flags & CLANG_LINECONT) || n <= 0 || str[n - 1] != '\\')) {
         state &= ~IN_C_PREPROCESS;
     }
     cp->colorize_state = state;
@@ -643,16 +707,12 @@ static void c_colorize_line(QEColorizeContext *cp,
 
 /* gives the position of the first non white space character in
    buf. TABs are counted correctly */
-static int find_indent1(EditState *s, const char32_t *buf) {
-    const char32_t *p;
-    char32_t c;
-    int pos, tw;
+static int find_indent1(EditState *s, const char32_t *p) {
+    int tw = s->b->tab_width > 0 ? s->b->tab_width : 8;
+    int pos = 0;
 
-    tw = s->b->tab_width > 0 ? s->b->tab_width : 8;
-    p = buf;
-    pos = 0;
     for (;;) {
-        c = *p++;
+        char32_t c = *p++;
         if (c == '\t')
             pos += tw - (pos % tw);
         else if (c == ' ')
@@ -691,7 +751,7 @@ enum {
 /* Normalize indentation at <offset>, return offset past indentation */
 static int normalize_indent(EditState *s, int offset, int indent)
 {
-    int ntabs, nspaces, update, offset0, offset1;
+    int ntabs, nspaces, offset1, offset2;
 
     if (indent < 0)
         indent = 0;
@@ -702,37 +762,30 @@ static int normalize_indent(EditState *s, int offset, int indent)
         ntabs = nspaces / tw;
         nspaces = nspaces % tw;
     }
-    offset0 = offset;
-    for (update = 0;;) {
-        char32_t c = eb_nextc(s->b, offset1 = offset, &offset);
+    for (offset1 = offset;;) {
+        char32_t c = eb_nextc(s->b, offset2 = offset1, &offset1);
         if (c == '\t') {
-            if (!update && ntabs > 0) {
+            if (offset == offset2 && ntabs) {
                 ntabs--;
-                offset0 = offset;
-            } else {
-                update = 1;
+                offset = offset1;
             }
-            continue;
-        }
+        } else
         if (c == ' ') {
-            if (!update && ntabs == 0 && nspaces > 0) {
+            if (offset == offset2 && !ntabs && nspaces) {
                 nspaces--;
-                offset0 = offset;
-            } else {
-                update = 1;
+                offset = offset1;
             }
-            continue;
+        } else {
+            break;
         }
-        break;
     }
-    if (offset1 > offset0)
-        eb_delete_range(s->b, offset0, offset1);
+    if (offset2 > offset)
+        eb_delete_range(s->b, offset, offset2);
     if (ntabs)
-        offset0 += eb_insert_char32_n(s->b, offset0, '\t', ntabs);
+        offset += eb_insert_char32_n(s->b, offset, '\t', ntabs);
     if (nspaces)
-        offset0 += eb_insert_spaces(s->b, offset0, nspaces);
-
-    return offset0;
+        offset += eb_insert_spaces(s->b, offset, nspaces);
+    return offset;
 }
 
 /* Check if line starts with a label or a switch case */
@@ -740,10 +793,9 @@ static int c_line_has_label(EditState *s, const char32_t *buf, int len,
                             const QETermStyle *sbuf)
 {
     char kbuf[64];
-    int i, j, style;
+    int i, style;
 
-    for (i = 0; i < len && qe_isblank(buf[i]); i++)
-        continue;
+    i = cp_skip_blanks(buf, 0, len);
 
     style = sbuf[i];
     if (style == C_STYLE_COMMENT
@@ -752,11 +804,10 @@ static int c_line_has_label(EditState *s, const char32_t *buf, int len,
     ||  style == C_STYLE_PREPROCESS)
         return 0;
 
-    j = get_c_identifier(kbuf, countof(kbuf), buf + i, CLANG_C);
+    i += get_c_identifier(kbuf, countof(kbuf), 0, buf, i, len, CLANG_C);
     if (style == C_STYLE_KEYWORD && strfind("case|default", kbuf))
         return 1;
-    for (i += j; i < len && qe_isblank(buf[i]); i++)
-        continue;
+    i = cp_skip_blanks(buf, i, len);
     return (buf[i] == ':');
 }
 
@@ -778,16 +829,17 @@ static int c_line_has_label(EditState *s, const char32_t *buf, int len,
 */
 void c_indent_line(EditState *s, int offset0)
 {
+    QEColorizeContext cp[1];
     int offset, offset1, offsetl, pos, line_num, col_num;
     int i, eoi_found, len, pos1, lpos, style, line_num1, state;
     int off, found_comma, has_else;
     char32_t c;
     //int found_semi = 0;
-    char32_t buf[COLORED_MAX_LINE_SIZE];
-    QETermStyle sbuf[COLORED_MAX_LINE_SIZE];
     char32_t stack[MAX_STACK_SIZE];
     char kbuf[64], *q;
     int stack_ptr;
+
+    cp_initialize(cp, s);
 
     /* find start of line */
     eb_get_pos(s->b, &line_num, &col_num, offset0);
@@ -807,20 +859,19 @@ void c_indent_line(EditState *s, int offset0)
         line_num--;
         offsetl = eb_prev_line(s->b, offsetl);
         /* XXX: deal with truncation */
-        len = get_colorized_line(s, buf, countof(buf), sbuf,
-                                 offsetl, &offset1, line_num);
+        len = get_colorized_line(cp, offsetl, &offset1, line_num);
         /* get current indentation of this line, adjust if it has a label */
-        pos1 = find_indent1(s, buf);
+        pos1 = find_indent1(s, cp->buf);
         /* ignore empty and preprocessor lines */
-        if (pos1 == len || sbuf[0] == C_STYLE_PREPROCESS)
+        if (pos1 == len || cp->sbuf[0] == C_STYLE_PREPROCESS)
             continue;
-        if (c_line_has_label(s, buf, len, sbuf)) {
-            pos1 = pos1 - s->qe_state->c_label_indent + s->indent_size;
+        if (c_line_has_label(s, cp->buf, len, cp->sbuf)) {
+            pos1 = pos1 - s->qs->c_label_indent + s->indent_width;
         }
         /* scan the line from end to start */
         for (off = len; off-- > 0;) {
-            c = buf[off];
-            style = sbuf[off];
+            c = cp->buf[off];
+            style = cp->sbuf[off];
             /* skip strings or comments */
             if (style == C_STYLE_COMMENT
             ||  style == C_STYLE_STRING
@@ -847,18 +898,18 @@ void c_indent_line(EditState *s, int offset0)
                 int off0, off1;
                 /* special case for if/for/while */
                 off1 = off;
-                while (off > 0 && sbuf[off - 1] == C_STYLE_KEYWORD)
+                while (off > 0 && cp->sbuf[off - 1] == C_STYLE_KEYWORD)
                     off--;
                 off0 = off;
                 if (stack_ptr == 0) {
                     q = kbuf;
                     while (q < kbuf + countof(kbuf) - 1 && off0 <= off1) {
-                        *q++ = buf[off0++];
+                        *q++ = cp->buf[off0++];
                     }
                     *q = '\0';
 
                     if (!eoi_found && strfind("if|for|while|do|switch|foreach", kbuf)) {
-                        pos = pos1 + s->indent_size;
+                        pos = pos1 + s->indent_width;
                         goto end_parse;
                     }
                     if (has_else == 0)
@@ -883,7 +934,7 @@ void c_indent_line(EditState *s, int offset0)
                             goto end_parse;
                         }
                         if (lpos == -1) {
-                            pos = pos1 + s->indent_size;
+                            pos = pos1 + s->indent_width;
                             eoi_found = 1;
                             goto end_parse;
                         } else {
@@ -908,7 +959,7 @@ void c_indent_line(EditState *s, int offset0)
                 case '(':
                 case '[':
                     if (stack_ptr == 0) {
-                        pos = find_pos(s, buf, off) + 1;
+                        pos = find_pos(s, cp->buf, off) + 1;
                         goto end_parse;
                     } else {
                         char32_t matchc = (c == '(') ? ')' : ']';
@@ -947,7 +998,7 @@ void c_indent_line(EditState *s, int offset0)
                             /* start of instruction already found */
                             pos = lpos;
                             if (!eoi_found)
-                                pos += s->indent_size;
+                                pos += s->indent_width;
                             goto end_parse;
                         }
                         eoi_found = 1;
@@ -960,7 +1011,7 @@ void c_indent_line(EditState *s, int offset0)
                     /* XXX: should handle labels differently:
                        measure the indent and adjust by label_indent */
                     if (style == C_STYLE_DEFAULT
-                    &&  (off == 0 || !qe_isspace(buf[off - 1]))) {
+                    &&  (off == 0 || !qe_isspace(cp->buf[off - 1]))) {
                         off = 0;
                     }
                     break;
@@ -972,7 +1023,7 @@ void c_indent_line(EditState *s, int offset0)
             }
         }
         if (pos1 == 0 && len > 0) {
-            style = sbuf[0];
+            style = cp->sbuf[0];
             if (style != C_STYLE_COMMENT
             &&  style != C_STYLE_STRING
             &&  style != C_STYLE_STRING_Q
@@ -985,26 +1036,25 @@ void c_indent_line(EditState *s, int offset0)
   end_parse:
     /* compute special cases which depend on the chars on the current line */
     /* XXX: deal with truncation */
-    len = get_colorized_line(s, buf, countof(buf), sbuf,
-                             offset, &offset1, line_num1);
-    if (sbuf[0] == C_STYLE_PREPROCESS)
-        return;
+    len = get_colorized_line(cp, offset, &offset1, line_num1);
+    if (cp->sbuf[0] == C_STYLE_PREPROCESS)
+        goto done;
 
     if (stack_ptr == 0) {
         if (!pos && lpos >= 0) {
             /* start of instruction already found */
             pos = lpos;
             if (!eoi_found)
-                pos += s->indent_size;
+                pos += s->indent_width;
         }
     }
 
     for (i = 0; i < len; i++) {
-        c = buf[i];
+        c = cp->buf[i];
         if (qe_isblank(c))
             continue;
         /* no looping from here down */
-        style = sbuf[i];
+        style = cp->sbuf[i];
         if (style == C_STYLE_STRING || style == C_STYLE_STRING_Q)
             break;
         /* if preprocess, no indent */
@@ -1026,45 +1076,45 @@ void c_indent_line(EditState *s, int offset0)
             break;
         }
         if (qe_isalpha_(c)) {
-            if (has_else == 1 && buf[i] == 'i' && buf[i + 1] == 'f' && !qe_isalnum_(buf[i + 2])) {
+            if (has_else == 1 && cp->buf[i] == 'i' && cp->buf[i + 1] == 'f' && !qe_isalnum_(cp->buf[i + 2])) {
                 /* unindent if after naked else */
-                pos -= s->indent_size;
+                pos -= s->indent_width;
                 break;
             }
-            if (c_line_has_label(s, buf + i, len - i, sbuf + i)) {
-                pos -= s->indent_size + s->qe_state->c_label_indent;
+            if (c_line_has_label(s, cp->buf + i, len - i, cp->sbuf + i)) {
+                pos -= s->indent_width + s->qs->c_label_indent;
                 break;
             }
             break;
         }
         /* NOTE: strings & comments are correctly ignored there */
         if (c == '}') {
-            pos -= s->indent_size;
+            pos -= s->indent_width;
             break;
         }
-        if ((c == '&' || c == '|') && buf[i + 1] == c) {
+        if ((c == '&' || c == '|') && cp->buf[i + 1] == c) {
 #if 0
             int j;
             // XXX: should try and indent according to boolean expression depth
-            for (j = i + 2; buf[j] == ' '; j++)
+            for (j = i + 2; cp->buf[j] == ' '; j++)
                 continue;
             if (j == len) {
-                pos -= s->indent_size;
+                pos -= s->indent_width;
             } else {
                 pos -= j - i + 2;
             }
 #else
-            pos -= s->indent_size;
+            pos -= s->indent_width;
 #endif
             break;
         }
         if (c == '{') {
-            if (pos == s->indent_size && !eoi_found) {
+            if (pos == s->indent_width && !eoi_found) {
                 pos = 0;
                 break;
             }
             // XXX: need fix for GNU style
-            pos -= s->indent_size;
+            pos -= s->indent_width;
         }
         break;
     }
@@ -1087,10 +1137,9 @@ void c_indent_line(EditState *s, int offset0)
 #if 0
     if (s->mode->auto_indent > 1) {  /* auto format */
         /* recompute colorization of the current line (after re-indentation) */
-        len = get_colorized_line(s, buf, countof(buf), sbuf,
-                                 offset, &offset1, line_num1);
+        len = get_colorized_line(cp, offset, &offset1, line_num1);
         /* skip indentation */
-        for (pos = 0; qe_isblank(buf[pos]); pos++)
+        for (pos = 0; qe_isblank(cp->buf[pos]); pos++)
             continue;
         /* XXX: keywords "if|for|while|switch -> one space before `(` */
         /* XXX: keyword "return" -> one space before expression */
@@ -1109,16 +1158,23 @@ void c_indent_line(EditState *s, int offset0)
     if (s->offset >= offset && s->offset < offset1) {
         s->offset = offset1;
     }
+done:
+    cp_destroy(cp);
 }
 
 static void do_c_indent(EditState *s)
 {
-    if (eb_is_in_indentation(s->b, s->offset)
-    &&  s->qe_state->last_cmd_func != (CmdFunc)do_c_indent) {
+    QEmacsState *qs = s->qs;
+
+    if (!s->region_style
+    &&  !(s->b->flags & BF_PREVIEW)
+    &&  qs->last_cmd_func != (CmdFunc)do_tabulate
+    &&  eb_is_in_indentation(s->b, s->offset)) {
         c_indent_line(s, s->offset);
     } else {
-        do_tab(s, 1);
+        do_tabulate(s, 1);
     }
+    qs->this_cmd_func = (CmdFunc)do_tabulate;
 }
 
 static void do_c_electric_key(EditState *s, int key)
@@ -1162,21 +1218,21 @@ static void do_c_newline(EditState *s)
 /* forward / backward preprocessor */
 static void c_forward_conditional(EditState *s, int dir)
 {
-    char32_t buf[COLORED_MAX_LINE_SIZE], *p;
-    QETermStyle sbuf[COLORED_MAX_LINE_SIZE];
+    QEColorizeContext cp[1];
+    char32_t *p;
     int line_num, col_num, sharp, level;
     int offset, offset0, offset1;
 
+    cp_initialize(cp, s);
     offset = offset0 = eb_goto_bol(s->b, s->offset);
     eb_get_pos(s->b, &line_num, &col_num, offset);
     level = 0;
     for (;;) {
-        get_colorized_line(s, buf, countof(buf), sbuf,
-                           offset, &offset1, line_num);
+        get_colorized_line(cp, offset, &offset1, line_num);
         sharp = 0;
-        for (p = buf; *p; p++) {
+        for (p = cp->buf; *p; p++) {
             char32_t c = *p;
-            int style = sbuf[p - buf];
+            int style = cp->sbuf[p - cp->buf];
             if (qe_isblank(c))
                 continue;
             if (c == '#' && style == C_STYLE_PREPROCESS)
@@ -1218,6 +1274,7 @@ static void c_forward_conditional(EditState *s, int dir)
         }
     }
     s->offset = offset;
+    cp_destroy(cp);
 }
 
 static void do_c_forward_conditional(EditState *s, int n)
@@ -1230,28 +1287,28 @@ static void do_c_forward_conditional(EditState *s, int n)
 
 static void do_c_list_conditionals(EditState *s)
 {
-    char32_t buf[COLORED_MAX_LINE_SIZE], *p;
-    QETermStyle sbuf[COLORED_MAX_LINE_SIZE];
+    QEColorizeContext cp[1];
+    char32_t *p;
     int line_num, col_num, sharp, level;
     int offset, offset1;
     EditBuffer *b;
 
-    b = eb_scratch("Preprocessor conditionals", BF_UTF8);
+    b = qe_new_buffer(s->qs, "Preprocessor conditionals", BC_REUSE | BC_CLEAR | BF_UTF8);
     if (!b)
         return;
 
+    cp_initialize(cp, s);
     offset = eb_goto_bol(s->b, s->offset);
     eb_get_pos(s->b, &line_num, &col_num, offset);
     level = 0;
     while (offset > 0) {
         line_num--;
         offset = eb_prev_line(s->b, offset);
-        get_colorized_line(s, buf, countof(buf), sbuf,
-                           offset, &offset1, line_num);
+        get_colorized_line(cp, offset, &offset1, line_num);
         sharp = 0;
-        for (p = buf; *p; p++) {
+        for (p = cp->buf; *p; p++) {
             char32_t c = *p;
-            int style = sbuf[p - buf];
+            int style = cp->sbuf[p - cp->buf];
             if (qe_isblank(c))
                 continue;
             if (c == '#' && style == C_STYLE_PREPROCESS)
@@ -1281,14 +1338,15 @@ static void do_c_list_conditionals(EditState *s)
         show_popup(s, b, "Preprocessor conditionals");
     } else {
         eb_free(&b);
-        put_status(s, "Not in a #if conditional");
+        put_error(s, "Not in a #if conditional");
     }
+    cp_destroy(cp);
 }
 
 /* C mode specific commands */
 static const CmdDef c_commands[] = {
-    CMD2( "c-indent-command", "TAB",
-          "Indent the current line",
+    CMD2( "c-indent-line-or-region", "TAB",
+          "Indent the current line or highlighted region",
           do_c_indent, ES, "*")
     CMD2( "c-backward-conditional", "M-[",
           "Move to the beginning of the previous #if preprocessing directive",
@@ -1343,8 +1401,8 @@ ModeDef c_mode = {
     .mode_probe = c_mode_probe,
     .colorize_func = c_colorize_line,
     .colorize_flags = CLANG_C | CLANG_CC,
-    .keywords = c_keywords,
-    .types = c_types,
+    .keywords = "", //c_keywords,
+    .types = "", //c_types,
     .indent_func = c_indent_line,
     .auto_indent = 1,
 };
@@ -1485,24 +1543,31 @@ static ModeDef carbon_mode = {
 /*---------------- C2 language ----------------*/
 
 static const char c2_keywords[] = {
-    // should remove C keywords:
-    //"extern|static|typedef|long|short|signed|unsigned|"
-    /* new C2 keywords */
-    "module|import|as|public|local|type|func|nil|elemsof|"
-    /* boolean values */
-    "false|true|"
+    // Module related
+    "module|import|as|public|"
+    // Types -> c2_types
+    // Type related
+    "auto|asm|cast|const|elemsof|enum|enum_min|enum_max|"
+    "false|fn|local|nil|offsetof|to_container|public|"
+    "sizeof|struct|template|true|type|union|volatile|"
+    // Control flow related
+    "break|case|continue|default|do|else|fallthrough|"
+    "for|goto|if|return|switch|sswitch|while|"
+    // other
+    "assert|static_assert"
 };
 
 static const char c2_types[] = {
-    "bool|int8|int16|int32|int64|uint8|uint16|uint32|uint64|"
-    "float32|float64|"
+    "bool|i8|i16|i32|i64|u8|u16|u32|u64|isize|usize|f32|f64|void|"
+    "reg8|reg16|reg32|reg64|"
+    "char"  // same as i8, a design error
 };
 
 static ModeDef c2_mode = {
     .name = "C2",
-    .extensions = "c2|c2h|c2t",
+    .extensions = "c2|c2h|c2i|c2t",
     .colorize_func = c_colorize_line,
-    .colorize_flags = CLANG_C2 | CLANG_CC,
+    .colorize_flags = CLANG_C2 | CLANG_PREPROC | CLANG_CAP_TYPE,
     .keywords = c2_keywords,
     .types = c2_types,
     .indent_func = c_indent_line,
@@ -1653,52 +1718,71 @@ static int is_js_identifier_part(char32_t c) {
     return (qe_isalnum_(c) || c == '$' || c >= 128);
 }
 
+// FIXME: should merge into ustr_get_identifier()
 static int get_js_identifier(char *dest, int size, char32_t c,
-                             const char32_t *str, int i, int n)
+                             const char32_t *str, int i0, int n)
 {
-    int pos = 0, j;
+    /*@API utils
+       Grab an identifier from a `char32_t` buffer,
+       accept non-ASCII identifiers and encode in UTF-8.
+       @argument `dest` a pointer to the destination array
+       @argument `size` the length of the destination array in bytes
+       @argument `c` the initial code point or `0` if none
+       @argument `str` a valid pointer to an array of codepoints
+       @argument `i0` the index to the next codepoint
+       @argument `n` the length of the codepoint array
+       @return the number of codepoints used in the source array.
+       @note `dest` can be a null pointer if `size` is `0`.
+     */
+    int pos = 0, i = i0;
 
-    for (j = i;; j++) {
+    if (c == 0) {
+        if (!(i < n && is_js_identifier_start(c = str[i++]))) {
+            if (size > 0)
+                *dest = '\0';
+            return 0;
+        }
+    }
+    for (;; i++) {
         if (c < 128) {
-            if (pos < size - 1) {
+            if (pos + 1 < size) {
                 dest[pos++] = c;
             }
         } else {
             char buf[6];
-            int i1, len = utf8_encode(buf, c);
-            for (i1 = 0; i1 < len; i1++) {
-                if (pos < size - 1) {
-                    dest[pos++] = buf[i1];
-                }
+            int len = utf8_encode(buf, c);
+            if (pos + len < size) {
+                memcpy(dest + pos, buf, len);
+                pos += len;
+            } else {
+                size = pos + 1;
             }
         }
-        if (j >= n)
+        if (i >= n)
             break;
-        c = str[j];
-        // should use unicode_alpha test
+        c = str[i];
         if (!is_js_identifier_part(c))
             break;
     }
-    if (pos < size) {
+    if (pos < size)
         dest[pos] = '\0';
-    }
-    return j - i;
+    return i - i0;
 }
 
 static void js_colorize_line(QEColorizeContext *cp,
-                             char32_t *str, int n, ModeDef *syn)
+                             const char32_t *str, int n,
+                             QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start, i1, indent;
     int style, tag, level;
-    char32_t c, prev, delim;
+    char32_t c, delim;
     char kbuf[64];
     int mode_flags = syn->colorize_flags;
     int flavor = (mode_flags & CLANG_FLAVOR);
     int state = cp->colorize_state;
     //int type_decl;  /* unused */
 
-    indent = 0;
-    //for (; qe_isblank(str[indent]); indent++) continue;
+    indent = cp_skip_blanks(str, 0, n);
     tag = !qe_isblank(str[0]) && (cp->s->mode == syn || cp->s->mode == &htmlsrc_mode);
 
     start = i;
@@ -1729,14 +1813,24 @@ static void js_colorize_line(QEColorizeContext *cp,
     while (i < n) {
         start = i;
         c = str[i++];
-
         switch (c) {
+        case '*':
+            /* lone star at the beginning of a line in a shell buffer
+             * is treated as a comment start.  This improves colorization
+             * of diff and git output.
+             */
+            if (start == indent && cp->partial_file
+            &&  (i == n || str[i] == ' ' || str[i] == '/')) {
+                i--;
+                goto parse_comment2;
+            }
+            continue;
         case '/':
             if (str[i] == '*') {
                 /* C style multi-line comment */
                 i++;
-                state |= IN_C_COMMENT2;
             parse_comment2:
+                state |= IN_C_COMMENT2;
                 style = C_STYLE_COMMENT;
                 level = (state & IN_C_COMMENT_LEVEL) >> IN_C_COMMENT_SHIFT;
                 while (i < n) {
@@ -1767,60 +1861,68 @@ static void js_colorize_line(QEColorizeContext *cp,
                 i = n;
                 break;
             }
-            /* XXX: should use more context to tell regex from divide */
-            prev = ' ';
-            for (i1 = start; i1 > indent; ) {
-                prev = str[--i1] & CHAR_MASK;
-                if (!qe_isblank(prev))
+            if (mode_flags & CLANG_REGEX) {
+                /* XXX: should use more context to tell regex from divide */
+                char32_t prev = ' ';
+                for (i1 = start; i1 > indent; ) {
+                    prev = str[--i1];
+                    if (!qe_isblank(prev))
+                        break;
+                }
+                /* ignore end of comment in grep output */
+                if (start > indent && str[start - 1] == '*' && cp->partial_file)
                     break;
-            }
-            if ((mode_flags & CLANG_REGEX)
-            &&  !qe_findchar("])", prev)
-            &&  (qe_findchar(" [({},;=<>!~^&|*/%?:", prev)
-            ||   (str[i1] >> STYLE_SHIFT) == C_STYLE_KEYWORD
-            ||   (str[i] != ' ' && (str[i] != '=' || str[i + 1] != ' ')
-            &&    !(qe_isalnum(prev) || prev == ')')))) {
-                /* parse regex */
-                state |= IN_C_REGEX;
-                delim = '/';
-            parse_regex:
-                style = C_STYLE_REGEX;
-                while (i < n) {
-                    c = str[i++];
-                    if (c == '\\') {
-                        if (i < n) {
-                            i += 1;
-                        }
-                    } else
-                    if (state & IN_C_CHARCLASS) {
-                        if (c == ']') {
-                            state &= ~IN_C_CHARCLASS;
-                        }
-                        /* ECMA 5: ignore '/' inside char classes */
-                    } else {
-                        if (c == '[') {
-                            state |= IN_C_CHARCLASS;
-                        } else
-                        if (c == delim) {
-                            while (qe_isalnum_(str[i])) {
-                                i++;
+
+                if (!qe_findchar("])", prev)
+                &&  (qe_findchar(" [({},;=<>!~^&|*/%?:", prev)
+                ||   sbuf[i1] == C_STYLE_KEYWORD
+                ||   (str[i] != ' ' && (str[i] != '=' || str[i + 1] != ' ')
+                &&    !(qe_isalnum(prev) || prev == ')')))) {
+                    /* parse regex */
+                    state |= IN_C_REGEX;
+                    delim = '/';
+                parse_regex:
+                    style = C_STYLE_REGEX;
+                    while (i < n) {
+                        c = str[i++];
+                        if (c == '\\') {
+                            if (i < n) {
+                                i += 1;
                             }
-                            state &= ~IN_C_REGEX;
-                            break;
+                        } else
+                        if (state & IN_C_CHARCLASS) {
+                            if (c == ']') {
+                                state &= ~IN_C_CHARCLASS;
+                            }
+                            /* ECMA 5: ignore '/' inside char classes */
+                        } else {
+                            if (c == '[') {
+                                state |= IN_C_CHARCLASS;
+                            } else
+                            if (c == delim) {
+                                while (qe_isalnum_(str[i])) {
+                                    i++;
+                                }
+                                state &= ~IN_C_REGEX;
+                                break;
+                            }
                         }
                     }
+                    break;
                 }
-                break;
             }
             continue;
         case '#':       /* preprocessor */
-            /* v8: #include */
-            if (start == 0 &&
-                (str[i] == '!' ||
-                 (flavor == CLANG_V8 &&
-                  ustrstart(str + i + 1, "include", NULL))))
-            {
+            if (start == 0 && str[i] == '!') {
                 /* recognize a shebang comment line */
+                style = C_STYLE_PREPROCESS;
+                i = n;
+                break;
+            }
+            if (flavor == CLANG_V8 && start == 0
+            &&  ustrstart(str + i + 1, "include", NULL)) {
+                /* v8: #include */
+                // FIXME: handle multiline comments
                 style = C_STYLE_PREPROCESS;
                 i = n;
                 break;
@@ -1947,25 +2049,21 @@ static void js_colorize_line(QEColorizeContext *cp,
                     break;
                 }
 
-                i1 = i;
-                while (qe_isblank(str[i1]))
-                    i1++;
+                i1 = cp_skip_blanks(str, i, n);
 
                 if (str[i1] == '(') {
                     /* function call or definition */
                     style = C_STYLE_FUNCTION;
                     if (tag) {
                         /* tag function definition */
-                        eb_add_property(cp->b, cp->offset + start,
-                                        QE_PROP_TAG, qe_strdup(kbuf));
+                        eb_add_tag(cp->b, cp->offset + start, kbuf);
                         tag = 0;
                     }
                     break;
                 } else
                 if (tag && qe_findchar("(,;=", str[i1])) {
                     /* tag variable definition */
-                    eb_add_property(cp->b, cp->offset + start,
-                                    QE_PROP_TAG, qe_strdup(kbuf));
+                    eb_add_tag(cp->b, cp->offset + start, kbuf);
                 }
 
                 if ((start == 0 || str[start - 1] != '.')
@@ -1988,7 +2086,7 @@ static void js_colorize_line(QEColorizeContext *cp,
         }
         if (style) {
             if (!cp->state_only) {
-                SET_COLOR(str, start, i, style);
+                SET_STYLE(sbuf, start, i, style);
             }
             style = 0;
         }
@@ -1996,7 +2094,7 @@ static void js_colorize_line(QEColorizeContext *cp,
  the_end:
     if (state & (IN_C_COMMENT | IN_C_STRING)) {
         /* set style on eol char */
-        SET_COLOR1(str, n, style);
+        SET_STYLE1(sbuf, n, style);
         if ((state & IN_C_COMMENT) == IN_C_COMMENT1)
             state &= ~IN_C_COMMENT1;
     }
@@ -2007,7 +2105,7 @@ ModeDef js_mode = {
     .name = "Javascript",
     .alt_name = "js",
     .extensions = "js",
-    .shell_handlers = "node",
+    .shell_handlers = "node|qjs",
     .colorize_func = js_colorize_line,
     .colorize_flags = CLANG_JS | CLANG_REGEX,
     .keywords = js_keywords,
@@ -2017,6 +2115,7 @@ ModeDef js_mode = {
     .fallback = &c_mode,
 };
 
+#ifndef CONFIG_TINY
 /*---------------- V8 Torque programming language ----------------*/
 
 static const char v8_keywords[] = {
@@ -2092,7 +2191,6 @@ ModeDef css_mode = {
     .fallback = &c_mode,
 };
 
-#ifndef CONFIG_TINY
 /*---------------- Typescript programming language ----------------*/
 
 static const char ts_keywords[] = {
@@ -2332,7 +2430,7 @@ static const char java_types[] = {
     "boolean|byte|char|double|float|int|long|short|void|"
 };
 
-static ModeDef java_mode = {
+ModeDef java_mode = {
     .name = "Java",
     .extensions = "jav|java",
     .colorize_func = c_colorize_line,
@@ -2407,6 +2505,7 @@ ModeDef php_mode = {
     .fallback = &c_mode,
 };
 
+#ifndef CONFIG_TINY
 /*---------------- Go programming language ----------------*/
 
 static const char go_keywords[] = {
@@ -2441,7 +2540,6 @@ static ModeDef go_mode = {
     .fallback = &c_mode,
 };
 
-#ifndef CONFIG_TINY
 /*---------------- Scala programming language ----------------*/
 
 static const char scala_keywords[] = {
@@ -2501,7 +2599,8 @@ static ModeDef d_mode = {
     .name = "D",
     .extensions = "d|di",
     .colorize_func = c_colorize_line,
-    .colorize_flags = CLANG_D,
+    /* only #line is supported, but can occur anywhere */
+    .colorize_flags = CLANG_D | CLANG_PREPROC | CLANG_T_TYPES,
     .keywords = d_keywords,
     .types = d_types,
     .indent_func = c_indent_line,
@@ -2738,15 +2837,17 @@ static ModeDef dart_mode = {
 /*---------------- Pike programming language ----------------*/
 
 static const char pike_keywords[] = {
-    "break|case|catch|class|constant|continue|default|do|else|enum|extern|"
+    "auto|break|case|catch|class|constant|continue|const|default|do|else|enum|extern|"
     "final|for|foreach|gauge|global|if|import|inherit|inline|"
-    "lambda|local|nomask|optional|predef|"
-    "private|protected|public|return|sscanf|static|switch|typedef|typeof|"
-    "while|__attribute__|__deprecated__|__func__|"
+    "lambda|local|optional|predef|private|protected|public|"
+    "return|sscanf|static|switch|throw|typedef|typeof|while|"
+    "_Static_assert|__async__|__attribute__|__deprecated__|"
+    "__experimental__|__func__|__generic__|__generator__|__weak__|"
+    "__unused__|__unknown__"
 };
 
 static const char pike_types[] = {
-    "array|float|int|string|function|mapping|multiset|mixed|object|program|"
+    "array|float|int|string|function|mapping|mixed|multiset|object|program|"
     "variant|void|"
 };
 
@@ -2754,7 +2855,7 @@ static ModeDef pike_mode = {
     .name = "Pike",
     .extensions = "pike",
     .colorize_func = c_colorize_line,
-    .colorize_flags = CLANG_PIKE,
+    .colorize_flags = CLANG_PIKE | CLANG_PREPROC,
     .keywords = pike_keywords,
     .types = pike_types,
     .indent_func = c_indent_line,
@@ -3553,29 +3654,9 @@ static const char salmon_types[] = {
     "|"
 };
 
-static int get_salmon_identifier(char *dest, int size, char32_t c,
-                                 const char32_t *str, int i, int n)
-{
-    int pos = 0, j;
-
-    for (j = i;; j++) {
-        if (pos < size - 1) {
-            dest[pos++] = c;
-        }
-        if (j >= n)
-            break;
-        c = str[j];
-        if (!qe_isalnum_(c))
-            break;
-    }
-    if (pos < size) {
-        dest[pos] = '\0';
-    }
-    return j - i;
-}
-
 static void salmon_colorize_line(QEColorizeContext *cp,
-                                 char32_t *str, int n, ModeDef *syn)
+                                 const char32_t *str, int n,
+                                 QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start, i1;
     int style, tag, level;
@@ -3585,8 +3666,7 @@ static void salmon_colorize_line(QEColorizeContext *cp,
     int state = cp->colorize_state;
     //int type_decl;  /* unused */
 
-    //int indent = 0;
-    //for (; qe_isblank(str[indent]); indent++) continue;
+    //int indent = cp_skip_blanks(str, 0, n);
     tag = !qe_isblank(str[0]) && (cp->s->mode == syn || cp->s->mode == &htmlsrc_mode);
 
     start = i;
@@ -3754,7 +3834,7 @@ static void salmon_colorize_line(QEColorizeContext *cp,
                 break;
             }
             if (qe_isalpha_(c)) {
-                i += get_salmon_identifier(kbuf, countof(kbuf), c, str, i, n);
+                i += ustr_get_identifier(kbuf, countof(kbuf), c, str, i, n);
                 if (cp->state_only && !tag)
                     continue;
 
@@ -3766,25 +3846,21 @@ static void salmon_colorize_line(QEColorizeContext *cp,
                     break;
                 }
 
-                i1 = i;
-                while (qe_isblank(str[i1]))
-                    i1++;
+                i1 = cp_skip_blanks(str, i, n);
 
                 if (str[i1] == '(') {
                     /* function call or definition */
                     style = C_STYLE_FUNCTION;
                     if (tag) {
                         /* tag function definition */
-                        eb_add_property(cp->b, cp->offset + start,
-                                        QE_PROP_TAG, qe_strdup(kbuf));
+                        eb_add_tag(cp->b, cp->offset + start, kbuf);
                         tag = 0;
                     }
                     break;
                 } else
                 if (tag && qe_findchar("(,;=", str[i1])) {
                     /* tag variable definition */
-                    eb_add_property(cp->b, cp->offset + start,
-                                    QE_PROP_TAG, qe_strdup(kbuf));
+                    eb_add_tag(cp->b, cp->offset + start, kbuf);
                 }
 
                 if ((start == 0 || str[start - 1] != '.')
@@ -3807,7 +3883,7 @@ static void salmon_colorize_line(QEColorizeContext *cp,
         }
         if (style) {
             if (!cp->state_only) {
-                SET_COLOR(str, start, i, style);
+                SET_STYLE(sbuf, start, i, style);
             }
             style = 0;
         }
@@ -3815,7 +3891,7 @@ static void salmon_colorize_line(QEColorizeContext *cp,
  the_end:
     if (state & (IN_C_COMMENT | IN_C_STRING)) {
         /* set style on eol char */
-        SET_COLOR1(str, n, style);
+        SET_STYLE1(sbuf, n, style);
         if ((state & IN_C_COMMENT) == IN_C_COMMENT1)
             state &= ~IN_C_COMMENT1;
     }
@@ -3835,72 +3911,850 @@ static ModeDef salmon_mode = {
     .auto_indent = 1,
     .fallback = &c_mode,
 };
+
+/*---------------- PPL: Christian Neumanns' Practical Programming Language ----------------*/
+
+static const char ppl_keywords[] = {
+    /* language keywords */
+    "factory|service|functions|function|command|script|template|param|"
+    "record|enum|throw|as|type|inherit|creator|default|"
+    "java|java_header|end|var|variable|redefine|"
+    "and|or|xor|is|not|may|be|out_check|assert|this|const|"
+    "on_error|throw_error|att|attribute|attributes|"
+    "return|if|then|else|"
+    "when|otherwise|repeat|times|to|try|catch_any|on|"
+    "check|and_check|attributes_check|tests|test|verify|verify_error|"
+    "private|public|get|set|in|out|in_out|in_all|"
+    /* boolean and null literals */
+    "yes|no|null|void|"
+};
+
+static const char ppl_phrases[] = {
+    "repeat for each|repeat from|repeat while|repeat forever|"
+    "exit repeat|next repeat|"
+    "case type of|case enum of|case value of|case reference of|"
+};
+
+static const char ppl_types[] = {
+    "any|none|non_null|yes_no|character|string|regex|list|map|"
+    "signed_int_64|zero_neg_64|zero_pos_64|neg_64|pos_64|"
+    "signed_int_32|zero_neg_32|zero_pos_32|neg_32|pos_32|"
+    "signed_integer_64|zero_negative_64|zero_positive_64|negative_64|positive_64|"
+    "signed_integer_32|zero_negative_32|zero_positive_32|negative_32|positive_32|"
+    "float_64|float_32|number|"
+};
+
+enum {
+    PPL_STYLE_DEFAULT    = 0,
+    PPL_STYLE_PREPROCESS = QE_STYLE_PREPROCESS,
+    PPL_STYLE_COMMENT    = QE_STYLE_COMMENT,
+    PPL_STYLE_STRING     = QE_STYLE_STRING,
+    PPL_STYLE_STRING_Q   = QE_STYLE_STRING_Q,
+    PPL_STYLE_NUMBER     = QE_STYLE_NUMBER,
+    PPL_STYLE_KEYWORD    = QE_STYLE_KEYWORD,
+    PPL_STYLE_TYPE       = QE_STYLE_TYPE,
+    PPL_STYLE_FUNCTION   = QE_STYLE_FUNCTION,
+};
+
+enum {
+    IN_PPL_COMMENT    = 0x03,  /* one of the comment styles */
+    IN_PPL_COMMENT1   = 0x01,  /* single line comment // ... EOL */
+    IN_PPL_COMMENT2   = 0x02,  /* multiline PPL comment /// ... ./// */
+    IN_PPL_STRING     = 0x1C,  /* 3 bits for string styles */
+    IN_PPL_STRING_D   = 0x04,  /* double-quoted string */
+    IN_PPL_STRING_Q   = 0x08,  /* single-quoted string */
+    IN_PPL_STRING_D3  = 0x14,  /* """ multiline quoted string with interpolation */
+    IN_PPL_STRING_Q3  = 0x18,  /* ''' multiline quoted string */
+    IN_PPL_PREPROCESS = 0x20,  /* preprocessor directive */
+    IN_PPL_COMMENT_SHIFT = 8,  /* shift for block comment nesting level */
+    IN_PPL_COMMENT_LEVEL = 0x700, /* mask for block comment nesting level */
+    IN_PPL_JAVA = 0x800,
+};
+
+static int cp_match_keywords(const char32_t *str, int n, int start, const char *s, int *end) {
+    /*@API utils
+       Match a sequence of words from a | separated list of phrases.
+       A space in the string matches a non empty white space sequence in the source array.
+       Phrases are delimited by `|` characters.
+       @argument `str` a valid pointer to an array of codepoints
+       @argument `start` the index to the next codepoint
+       @argument `n` the length of the codepoint array
+       @argument `s` a valid pointer to a string containing phrases delimited by `|`.
+       @argument `end` a valid pointer to store the index of the codepoint after the end of a match.
+       @return a boolean success indicator.
+     */
+    int i = start;
+    size_t j = 0;
+    for (;;) {
+        unsigned char cc = s[j++];
+        if (cc == '|' || cc == '\0') {
+            if (i == n || !qe_isalnum_(str[i])) {
+                *end = i;
+                return 1;
+            }
+            if (cc == '\0')
+                return 0;
+            i = start;
+        } else {
+            if (cc == ' ') {
+                int i1 = i;
+                i = cp_skip_blanks(str, i, n);
+                if (i > i1)
+                    continue;
+            } else {
+                if (i < n && cc == str[i++])
+                    continue;
+            }
+            for (;;) {
+                cc = s[j++];
+                if (cc == '\0')
+                    return 0;
+                if (cc == '|')
+                    break;
+            }
+            i = start;
+        }
+    }
+}
+
+static void ppl_colorize_line(QEColorizeContext *cp,
+                              const char32_t *str, int n,
+                              QETermStyle *sbuf, ModeDef *syn)
+{
+    int i = 0, start, i1;
+    int indent = 0, style, level, type_decl;
+    char32_t c, delim, last;
+    char kbuf[64];
+    int state = cp->colorize_state;
+
+    indent = cp_skip_blanks(str, 0, n);
+    start = i;
+    type_decl = 0;
+    c = 0;
+    style = 0;
+    last = n > 0 ? str[n - 1] : 0;
+    kbuf[0] = '\0';
+
+    if (state) {
+        /* if already in a state, go directly in the code parsing it */
+        if (state & IN_PPL_JAVA) {
+            if (cp_match_keywords(str, n, 0, " end java", &i1)
+            ||  cp_match_keywords(str, n, 0, " end java_header", &i1)) {
+                state = 0;
+            } else {
+                cp->colorize_state = state & ~IN_PPL_JAVA;
+                cp_colorize_line(cp, str, 0, n, sbuf, &java_mode);
+                state = cp->colorize_state | IN_PPL_JAVA;
+                i = n;
+                goto done;
+            }
+        }
+        if (state & IN_PPL_COMMENT2)
+            goto parse_comment2;
+        switch (state & IN_PPL_STRING) {
+        case IN_PPL_STRING_D: goto parse_string;
+        case IN_PPL_STRING_Q: goto parse_string_q;
+        case IN_PPL_STRING_D3: goto parse_string3;
+        case IN_PPL_STRING_Q3: goto parse_string_q3;
+        }
+    }
+
+    while (i < n) {
+        start = i;
+        c = str[i++];
+
+        switch (c) {
+        case ' ':
+        case '\t':
+            continue;
+        case '*':
+            if (start == indent && cp->partial_file)
+                goto parse_comment2;
+            goto normal;
+        case '/':
+            if (str[i] == '/') {
+                if (str[i + 1] == '/') {
+                    /* PPL multi-line comment */
+                    i += 2;
+                parse_comment2:
+                    state |= IN_PPL_COMMENT2;
+                    style = PPL_STYLE_COMMENT;
+                    level = (state & IN_PPL_COMMENT_LEVEL) >> IN_PPL_COMMENT_SHIFT;
+                    while (i < n) {
+                        if (str[i] == '/' && str[i + 1] == '/' && str[i + 2] == '/') {
+                            i += 3;
+                            level++;
+                        } else
+                        if (str[i] == '.' && str[i + 1] == '/' && str[i + 2] == '/' && str[i + 3] == '/') {
+                            i += 4;
+                            if (level == 0) {
+                                state &= ~IN_PPL_COMMENT2;
+                                break;
+                            }
+                            level--;
+                        } else {
+                            i++;
+                        }
+                    }
+                    state = (state & ~IN_PPL_COMMENT_LEVEL) |
+                        (min_int(level, 7) << IN_PPL_COMMENT_SHIFT);
+                    break;
+                } else {
+                    /* line comment */
+                    state |= IN_PPL_COMMENT1;
+                    style = PPL_STYLE_COMMENT;
+                    i = n;
+                    break;
+                }
+            }
+            type_decl = 0;  /* division operator */
+            continue;
+        case '%':       /* template instantiation */
+            if (is_js_identifier_start(str[i])) {
+                c = str[i++];
+                i += get_js_identifier(kbuf, countof(kbuf), c, str, i, n);
+                style = PPL_STYLE_PREPROCESS;
+            }
+            type_decl = 0;
+            break;
+        case '\'':      /* character constant */
+            if (str[i] == '\'' && str[i + 1] == '\'') {
+                /* multiline ''' quoted string */
+                i += 2;
+                state |= IN_PPL_STRING_Q3;
+            parse_string_q3:
+                style = PPL_STYLE_STRING_Q;
+                delim = '\'';
+                goto string3;
+            }
+            state |= IN_PPL_STRING_Q;
+        parse_string_q:
+            style = PPL_STYLE_STRING_Q;
+            delim = '\'';
+            goto string;
+
+        case '\"':      /* string literal */
+            if (str[i] == '\"' && str[i + 1] == '\"') {
+                /* multiline """ quoted string */
+                i += 2;
+                state |= IN_PPL_STRING_D3;
+                goto parse_string3;
+            }
+            state |= IN_PPL_STRING_D;
+        parse_string:
+            style = PPL_STYLE_STRING;
+            delim = '\"';
+        string:
+            while (i < n) {
+                c = str[i++];
+                if (c == '\\') {
+                    if (i >= n)
+                        break;
+                    i++;
+                } else
+                if (c == delim) {
+                    state &= ~IN_PPL_STRING;
+                    break;
+                }
+            }
+            type_decl = 0;
+            break;
+        parse_string3:
+            style = PPL_STYLE_STRING;
+            delim = '\"';
+        string3:
+            while (i < n) {
+                c = str[i++];
+                // XXX: should detect and colorize {{ expression }}
+                if (c == delim && str[i] == delim && str[i + 1] == delim) {
+                    i += 2;
+                    if (str[i] == delim)
+                        i++;
+                    state &= ~IN_PPL_STRING;
+                    break;
+                }
+            }
+            type_decl = 0;
+            break;
+        case '-':
+            if (str[i] == '>') {  /* function return type */
+                i++;
+                type_decl = 1;
+                style = PPL_STYLE_KEYWORD;
+                break;
+            }
+            type_decl = 0;  /* subtraction operator */
+            continue;
+        case '<':
+            if (str[i] != '=' && type_decl == 2)
+                type_decl = 1;
+            else
+                type_decl = 0;
+            continue;
+        case '>':
+            if (!(str[i] != '=' && type_decl == 2))
+                type_decl = 0;
+            continue;
+        case '#':
+            if (start == 0 && str[i] == '!') {
+                /* recognize a shebang comment line */
+                style = PPL_STYLE_PREPROCESS;
+                i = n;
+                break;
+            }
+            /* fallthrough */
+        case '=':
+            if (str[i] == 'v' || str[i] == 'r')
+                i++;
+            type_decl = 0;
+            continue;
+        case ':':
+            if (strequal(kbuf, "type"))
+                type_decl = 1;
+            else
+                type_decl = 0;
+            continue;
+        case '.':
+            type_decl = 0;
+            if (start == indent && i == n) {
+                style = PPL_STYLE_KEYWORD;
+                break;
+            }
+            continue;
+        default:
+        normal:
+            if (qe_isdigit(c)) {
+                /* XXX: should parse actual number syntax */
+                while (qe_isalnum(str[i]) ||
+                       (str[i] == '.' && qe_isdigit(str[i + 1])) ||
+                       ((str[i] == '+' || str[i] == '-') &&
+                        qe_tolower(str[i - 1]) == 'e' &&
+                        qe_isdigit(str[i + 1])))
+                {
+                    i++;
+                }
+                style = PPL_STYLE_NUMBER;
+                break;
+            }
+            if (is_js_identifier_start(c)) {
+                if (start == indent && cp_match_keywords(str, n, i - 1, ppl_phrases, &i)) {
+                    style = PPL_STYLE_KEYWORD;
+                    type_decl = 0;
+                    break;
+                }
+                i += get_js_identifier(kbuf, countof(kbuf), c, str, i, n);
+                if (cp->state_only)
+                    continue;
+
+                if (strfind(syn->keywords, kbuf) || str[i] == ':') {
+                    if (strequal(kbuf, "null") && type_decl == 1) {
+                        // null as a type
+                    } else {
+                        style = PPL_STYLE_KEYWORD;
+                        if (strfind("on|factory|type|when|inherit", kbuf)) {
+                            type_decl = 1;
+                        } else
+                        if (strequal(kbuf, "or") && type_decl == 2) {
+                            type_decl = 1;
+                        } else {
+                            type_decl = 0;
+                        }
+                        if (start == indent
+                        &&  strfind("function|creator|command|template|service|factory|type", kbuf))
+                        {
+                            int fstart = cp_skip_blanks(str, i, n);
+                            if (get_js_identifier(kbuf, countof(kbuf), 0, str, fstart, n))
+                                eb_add_tag(cp->b, cp->offset + start, kbuf);
+                        } else
+                        if (start == indent && strfind("java|java_header", kbuf)) {
+                            state |= IN_PPL_JAVA;
+                        }
+                        break;
+                    }
+                }
+
+                type_decl++;
+
+                i1 = cp_skip_blanks(str, i, n);
+                if (str[i1] == '(') {
+                    /* function call or definition */
+                    style = PPL_STYLE_FUNCTION;
+                    type_decl = 0;
+                    break;
+                }
+
+                if (type_decl == 2) {
+                    style = PPL_STYLE_TYPE;
+                    break;
+                }
+
+                if (strfind(syn->types, kbuf)) {
+                    style = PPL_STYLE_TYPE;
+                    break;
+                }
+                continue;
+            }
+            type_decl = 0;
+            continue;
+        }
+        if (style) {
+            if (!cp->state_only) {
+                SET_STYLE(sbuf, start, i, style);
+            }
+            style = 0;
+        }
+    }
+
+    if (state & (IN_PPL_COMMENT | IN_PPL_STRING)) {
+        /* set style on eol char */
+        SET_STYLE1(sbuf, n, style);
+        if ((state & IN_PPL_COMMENT) == IN_PPL_COMMENT1)
+            state &= ~IN_PPL_COMMENT1;
+    } else {
+        if (last != '\\' && last != '&') {
+            // should line continuation extend single line comment?
+            state &= ~IN_PPL_PREPROCESS;
+        }
+    }
+ done:
+    cp->colorize_state = state;
+}
+
+static ModeDef ppl_mode = {
+    .name = "PPL",
+    .extensions = "ppl",
+    .shell_handlers = "ppl",
+    .colorize_func = ppl_colorize_line,
+    .colorize_flags = CLANG_PPL,
+    .keywords = ppl_keywords,
+    .types = ppl_types,
+    .indent_func = c_indent_line,   // not really appropriate
+    .auto_indent = 1,
+    .fallback = &c_mode,
+};
 #endif  /* CONFIG_TINY */
+
+/*---------------- SerenityOS yakt programming language ----------------*/
+
+static const char jakt_keywords[] = {
+    "and|anon|boxed|break|catch|class|continue|cpp|defer|else|enum|"
+    "extern|false|for|fn|comptime|if|import|in|is|let|loop|match|"
+    "must|mut|namespace|not|or|private|public|raw|return|restricted|"
+    "struct|this|throw|throws|true|try|unsafe|weak|while|yield|guard|"
+    "as|never|null|forall|type|trait|requires|implements"
+};
+
+static const char jakt_types[] = {
+    "bool|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|usize|c_int|c_char|void|"
+    /* could use CLANG_CAP_TYPE but would not match TT */
+    "[A-Z][A-Za-z0-9]+"
+};
+
+// FIXME: Should support Attributes: start="#!\[" end="\]"
+
+static ModeDef jakt_mode = {
+    .name = "Jakt",
+    .extensions = "jakt",
+    .colorize_func = c_colorize_line,
+    .colorize_flags = CLANG_JAKT,
+    .keywords = jakt_keywords,
+    .types = jakt_types,
+    .indent_func = c_indent_line,
+    .auto_indent = 1,
+};
+
+/*---------------- Christoffer Lerno's C3 programming language (c3-lang.org) ----------------*/
+
+static const char c3_keywords[] = {
+    "asm|assert|bitstruct|break|case|catch|const|continue|def|"
+    "default|defer|distinct|do|else|enum|extern|false|fault|"
+    "for|foreach|foreach_r|fn|tlocal|if|inline|import|macro|"
+    "module|nextcase|null|return|static|struct|switch|true|try|"
+    "union|var|while|"
+    /* directives */
+    "$alignof|$assert|$case|$checks|$default|$defined|"
+    "$echo|$else|$endfor|$endforeach|$endif|$endswitch|"
+    "$for|$foreach|$if|$include|$nameof|$offsetof|"
+    "$qnameof|$sizeof|$stringify|$switch|$vacount|$vaconst|"
+    "$varef|$vaarg|$vaexpr|$vasplat|"
+};
+
+static const char c3_types[] = {
+    "void|bool|ichar|char|"
+    // Integer types
+    "short|ushort|int|uint|long|ulong|int128|uint128|iptr|uptr|isz|usz|"
+    // Floating point types
+    "float16|float|double|float128|"
+    // Other types
+    "any|anyfault|typeid|"
+    // C compatibility types
+    "CChar|CShort|CUShort|CInt|CUInt|CLong|CULong|CLongLong|CULongLong|CFloat|CDouble|CLongDouble|"
+    // CT types
+    "$typefrom|$tyypeof|$vatype|"
+    /* could use CLANG_CAP_TYPE but would not match TT */
+    "[A-Z][A-Za-z0-9]+"
+};
+
+enum {
+    C3_STYLE_DEFAULT    = 0,
+    C3_STYLE_PREPROCESS = QE_STYLE_PREPROCESS,
+    C3_STYLE_COMMENT    = QE_STYLE_COMMENT,
+    C3_STYLE_STRING     = QE_STYLE_STRING,
+    C3_STYLE_STRING_Q   = QE_STYLE_STRING_Q,
+    C3_STYLE_STRING_BQ  = QE_STYLE_STRING,
+    C3_STYLE_NUMBER     = QE_STYLE_NUMBER,
+    C3_STYLE_KEYWORD    = QE_STYLE_KEYWORD,
+    C3_STYLE_TYPE       = QE_STYLE_TYPE,
+    C3_STYLE_FUNCTION   = QE_STYLE_FUNCTION,
+    C3_STYLE_VARIABLE   = QE_STYLE_VARIABLE,
+};
+
+/* c-mode colorization states */
+enum {
+    IN_C3_COMMENT    = 0x03,  /* one of the comment styles */
+    IN_C3_COMMENT1   = 0x01,  /* single line comment with \ at EOL */
+    IN_C3_COMMENT2   = 0x02,  /* multiline C3 comment */
+    IN_C3_STRING_BQ  = 0x04,  /* back-quoted string */
+    IN_C3_CONTRACT1  = 0x40,  /* in the beginning of a contracts specification */
+    IN_C3_CONTRACT2  = 0x80,  /* in the contracts part of a contracts specification */
+    IN_C3_CONTRACTS  = 0xC0,  /* in a contracts specification */
+    IN_C3_COMMENT_SHIFT = 8,  /* shift for block comment nesting level */
+    IN_C3_COMMENT_LEVEL = 0x700, /* mask for block comment nesting level */
+};
+
+// FIXME: clean this, keep only C3 features
+static void c3_colorize_line(QEColorizeContext *cp,
+                             const char32_t *str, int n,
+                             QETermStyle *sbuf, ModeDef *syn)
+{
+    int i = 0, start, i1, i2, indent;
+    int style, level, tag;
+    char32_t c, delim;
+    char kbuf[64];
+    int state = cp->colorize_state;
+    //int type_decl;  /* unused */
+
+    indent = cp_skip_blanks(str, 0, n);
+    tag = !indent && cp->s->mode == syn;
+    start = i;
+    //type_decl = 0;
+    c = 0;
+    style = 0;
+
+    if (i >= n)
+        goto the_end;
+
+    if (state) {
+        /* if already in a state, go directly in the code parsing it */
+        if (state & IN_C3_COMMENT2)
+            goto parse_comment2;
+        if (state & IN_C3_STRING_BQ)
+            goto parse_string_bq;
+        if (state & IN_C3_CONTRACT1)
+            goto parse_contracts;
+    }
+
+    while (i < n) {
+        start = i;
+    reswitch:
+        c = str[i++];
+        switch (c) {
+        case '*':
+            if ((state & IN_C3_CONTRACTS) && str[i] == '>') {
+                i += 2;
+                state &= ~IN_C3_CONTRACTS;
+                style = C3_STYLE_PREPROCESS;
+                break;
+            }
+            /* lone star at the beginning of a line in a shell buffer
+             * is treated as a comment start.  This improves colorization
+             * of diff and git output.
+             */
+            if (start == indent && cp->partial_file
+            &&  (i == n || str[i] == ' ' || str[i] == '/')) {
+                i--;
+                goto parse_comment2;
+            }
+            continue;
+        case '/':
+            if (str[i] == '*') {
+                /* C style multi-line comment */
+                i++;
+            parse_comment2:
+                state |= IN_C3_COMMENT2;
+                style = C3_STYLE_COMMENT;
+                level = (state & IN_C3_COMMENT_LEVEL) >> IN_C3_COMMENT_SHIFT;
+                while (i < n) {
+                    if (str[i] == '/' && str[i + 1] == '*') {
+                        i += 2;
+                        level++;
+                    } else
+                    if (str[i] == '*' && str[i + 1] == '/') {
+                        i += 2;
+                        if (level == 0) {
+                            state &= ~IN_C3_COMMENT2;
+                            break;
+                        }
+                        level--;
+                    } else {
+                        i++;
+                    }
+                }
+                state = (state & ~IN_C3_COMMENT_LEVEL) |
+                        (min_int(level, 7) << IN_C3_COMMENT_SHIFT);
+                break;
+            } else
+            if (str[i] == '/') {
+                /* line comment */
+                style = C3_STYLE_COMMENT;
+                i = n;
+                break;
+            }
+            continue;
+        case '#':       /* preprocessor */
+            if (start == 0 && str[i] == '!') {
+                /* recognize a shebang comment line */
+                style = C3_STYLE_PREPROCESS;
+                i = n;
+                break;
+            }
+            continue;
+        case '@':       /* annotations or constraints */
+            i += get_js_identifier(kbuf, countof(kbuf), c, str, i, n);
+            style = C3_STYLE_PREPROCESS;
+            break;
+        case '`':
+        parse_string_bq:
+            state |= IN_C3_STRING_BQ;
+            style = C3_STYLE_STRING_BQ;
+            while (i < n) {
+                c = str[i++];
+                if (c == '`' && str[i] != '`') {
+                    state &= ~IN_C3_STRING_BQ;
+                    break;
+                }
+            }
+            break;
+
+        case '\'':      /* character constant */
+            style = C3_STYLE_STRING_Q;
+            delim = '\'';
+            goto string;
+
+        case '\"':      /* string literal */
+            style = C3_STYLE_STRING;
+            delim = '\"';
+        string:
+            while (i < n) {
+                c = str[i++];
+                if (c == '\\') {
+                    if (i >= n)
+                        break;
+                    i++;
+                } else
+                if (c == delim) {
+                    break;
+                }
+            }
+            break;
+        case '=':
+            /* exit type declaration */
+            /* does not handle this: int i = 1, j = 2; */
+            //type_decl = 0;
+            tag = 0;
+            continue;
+        case '<':
+            if (!(state & IN_C3_CONTRACTS) && str[i] == '*') {
+                state |= IN_C3_CONTRACT1;
+                i++;
+                SET_STYLE(sbuf, start, i, C3_STYLE_PREPROCESS);
+                start = i;
+            parse_contracts:
+                /* C3 contracts initial part */
+                while (i < n && qe_isspace(str[i]))
+                    i++;
+                style = C3_STYLE_COMMENT;
+                if (str[i] == '@' && qe_islower(str[i + 1])) {
+                    state |= IN_C3_CONTRACT2;
+                    break;
+                }
+                while (i < n && (str[i] != '*' || str[i + 1] != '>'))
+                    i++;
+                break;
+            }
+            continue;
+        case '(':
+        case '{':
+            tag = 0;
+            continue;
+        default:
+            if (qe_isdigit(c)) {
+                /* XXX: should parse actual number syntax */
+                /* decimal, binary, octal and hexadecimal literals:
+                 * 1 0b1 0o1 0x1, case insensitive. 01 is a syntax error */
+                /* ignore '_' between digits */
+                /* XXX: should parse decimal and hex floating point syntaxes */
+                while (qe_isalnum_(str[i]) || (str[i] == '.' && str[i + 1] != '.')) {
+                    i++;
+                }
+                style = C3_STYLE_NUMBER;
+                break;
+            }
+            if (is_js_identifier_start(c)) {
+                i += get_js_identifier(kbuf, countof(kbuf), c, str, i, n);
+                if (cp->state_only)
+                    continue;
+                if (str[i] == '\'' || str[i] == '\"') {
+                    /* check for encoding prefix */
+                    if (strfind("x|b64", kbuf))
+                        goto reswitch;
+                }
+                /* keywords used as object property tags are regular identifiers.
+                 * `default` is always considered a keyword as the context cannot be
+                 * determined precisely by this simplistic lexical parser */
+                if (strfind(syn->keywords, kbuf)
+                &&  (str[i] != ':' || strequal(kbuf, "default") || strequal(kbuf, "$default"))
+                &&  (start == 0 || str[start - 1] != '.')) {
+                    if (*kbuf == '$')
+                        style = C3_STYLE_PREPROCESS;
+                    else
+                        style = C3_STYLE_KEYWORD;
+                    break;
+                }
+
+                i1 = cp_skip_blanks(str, i, n);
+
+                if (str[i1] == '(') {
+                    /* function call or definition */
+                    style = C3_STYLE_FUNCTION;
+                    if (tag) {
+                        /* tag function definition */
+                        eb_add_tag(cp->b, cp->offset + start, kbuf);
+                        tag = 0;
+                    }
+                    break;
+                } else
+                if (tag && qe_findchar("(,;=", str[i1])) {
+                    /* tag variable definition */
+                    eb_add_tag(cp->b, cp->offset + start, kbuf);
+                }
+
+                if ((start == 0 || str[start - 1] != '.')
+                &&  !qe_findchar(".(:", str[i])
+                &&  strfind(syn->types, kbuf)) {
+                    /* if not cast, assume type declaration */
+                    //type_decl = 1;
+                    style = C3_STYLE_TYPE;
+                    break;
+                }
+                if (qe_isupper((unsigned char)kbuf[0])) {
+                    for (i2 = 1; kbuf[i2]; i2++) {
+                        if (qe_islower((unsigned char)kbuf[i2]))
+                            break;
+                    }
+                    /* if capitalized but not all caps assume type name */
+                    if (kbuf[i2]) {
+                        style = C3_STYLE_TYPE;
+                        break;
+                    }
+                }
+                continue;
+            }
+            continue;
+        }
+        if (style) {
+            if (!cp->state_only) {
+                SET_STYLE(sbuf, start, i, style);
+            }
+            style = 0;
+        }
+    }
+ the_end:
+    if (style == C3_STYLE_COMMENT || (state & IN_C3_STRING_BQ)) {
+        /* set style on eol char */
+        SET_STYLE1(sbuf, n, style);
+    }
+    cp->colorize_state = state;
+}
+
+static ModeDef c3_mode = {
+    .name = "C3",
+    .extensions = "c3|c3i|c3t",
+    .colorize_func = c3_colorize_line,
+    .colorize_flags = CLANG_C3 | CLANG_NEST_COMMENTS,
+    .keywords = c3_keywords,
+    .types = c3_types,
+    .indent_func = c_indent_line,
+    .auto_indent = 1,
+};
 
 /*---------------- Common initialization code ----------------*/
 
-static int c_init(void)
+static int c_init(QEmacsState *qs)
 {
-    qe_register_mode(&c_mode, MODEF_SYNTAX);
-    qe_register_commands(&c_mode, c_commands, countof(c_commands));
-    qe_register_mode(&cpp_mode, MODEF_SYNTAX);
-    qe_register_mode(&js_mode, MODEF_SYNTAX);
-    qe_register_mode(&v8_mode, MODEF_SYNTAX);
-    qe_register_mode(&bee_mode, MODEF_SYNTAX);
-    qe_register_mode(&java_mode, MODEF_SYNTAX);
-    qe_register_mode(&php_mode, MODEF_SYNTAX);
-    qe_register_mode(&go_mode, MODEF_SYNTAX);
-    qe_register_mode(&yacc_mode, MODEF_SYNTAX);
-    qe_register_mode(&lex_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &c_mode, MODEF_SYNTAX);
+    qe_register_commands(qs, &c_mode, c_commands, countof(c_commands));
+    qe_register_mode(qs, &cpp_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &js_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &java_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &php_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &go_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &yacc_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &lex_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &csharp_mode, MODEF_SYNTAX);
 #ifndef CONFIG_TINY
-    qe_register_mode(&idl_mode, MODEF_SYNTAX);
-    qe_register_mode(&carbon_mode, MODEF_SYNTAX);
-    qe_register_mode(&c2_mode, MODEF_SYNTAX);
-    qe_register_mode(&objc_mode, MODEF_SYNTAX);
-    qe_register_mode(&csharp_mode, MODEF_SYNTAX);
-    qe_register_mode(&awk_mode, MODEF_SYNTAX);
-    qe_register_mode(&css_mode, MODEF_SYNTAX);
-    qe_register_mode(&less_mode, MODEF_SYNTAX);
-    qe_register_mode(&json_mode, MODEF_SYNTAX);
-    qe_register_mode(&ts_mode, MODEF_SYNTAX);
-    qe_register_mode(&jspp_mode, MODEF_SYNTAX);
-    qe_register_mode(&koka_mode, MODEF_SYNTAX);
-    qe_register_mode(&as_mode, MODEF_SYNTAX);
-    qe_register_mode(&scala_mode, MODEF_SYNTAX);
-    qe_register_mode(&d_mode, MODEF_SYNTAX);
-    qe_register_mode(&limbo_mode, MODEF_SYNTAX);
-    qe_register_mode(&cyclone_mode, MODEF_SYNTAX);
-    qe_register_mode(&ch_mode, MODEF_SYNTAX);
-    qe_register_mode(&squirrel_mode, MODEF_SYNTAX);
-    qe_register_mode(&ici_mode, MODEF_SYNTAX);
-    qe_register_mode(&jsx_mode, MODEF_SYNTAX);
-    qe_register_mode(&haxe_mode, MODEF_SYNTAX);
-    qe_register_mode(&dart_mode, MODEF_SYNTAX);
-    qe_register_mode(&pike_mode, MODEF_SYNTAX);
-    qe_register_mode(&idl_mode, MODEF_SYNTAX);
-    qe_register_mode(&calc_mode, MODEF_SYNTAX);
-    qe_register_mode(&enscript_mode, MODEF_SYNTAX);
-    qe_register_mode(&qscript_mode, MODEF_SYNTAX);
-    qe_register_mode(&ec_mode, MODEF_SYNTAX);
-    qe_register_mode(&sl_mode, MODEF_SYNTAX);
-    qe_register_mode(&csl_mode, MODEF_SYNTAX);
-    qe_register_mode(&neko_mode, MODEF_SYNTAX);
-    qe_register_mode(&nml_mode, MODEF_SYNTAX);
-    qe_register_mode(&alloy_mode, MODEF_SYNTAX);
-    qe_register_mode(&scilab_mode, MODEF_SYNTAX);
-    qe_register_mode(&kotlin_mode, MODEF_SYNTAX);
-    qe_register_mode(&cbang_mode, MODEF_SYNTAX);
-    qe_register_mode(&vala_mode, MODEF_SYNTAX);
-    qe_register_mode(&pawn_mode, MODEF_SYNTAX);
-    qe_register_mode(&cminus_mode, MODEF_SYNTAX);
-    qe_register_mode(&gmscript_mode, MODEF_SYNTAX);
-    qe_register_mode(&wren_mode, MODEF_SYNTAX);
-    qe_register_mode(&jack_mode, MODEF_SYNTAX);
-    qe_register_mode(&smac_mode, MODEF_SYNTAX);
-    qe_register_mode(&v_mode, MODEF_SYNTAX);
-    qe_register_mode(&protobuf_mode, MODEF_SYNTAX);
-    qe_register_mode(&odin_mode, MODEF_SYNTAX);
-    qe_register_mode(&salmon_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &v8_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &bee_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &idl_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &carbon_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &c2_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &objc_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &awk_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &css_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &less_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &json_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &ts_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &jspp_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &koka_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &as_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &scala_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &d_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &limbo_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &cyclone_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &ch_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &squirrel_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &ici_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &jsx_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &haxe_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &dart_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &pike_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &idl_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &calc_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &enscript_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &qscript_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &ec_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &sl_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &csl_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &neko_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &nml_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &alloy_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &scilab_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &kotlin_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &cbang_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &vala_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &pawn_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &cminus_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &gmscript_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &wren_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &jack_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &smac_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &v_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &protobuf_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &odin_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &salmon_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &ppl_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &jakt_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &c3_mode, MODEF_SYNTAX);
 #endif
     return 0;
 }

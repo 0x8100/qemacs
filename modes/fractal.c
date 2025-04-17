@@ -61,17 +61,15 @@ enum {
 };
 
 static void fractint_colorize_line(QEColorizeContext *cp,
-                                   char32_t *str, int n, ModeDef *syn)
+                                   const char32_t *str, int n,
+                                   QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, start, indent, state, state1, style, klen;
     char32_t c, delim;
     char kbuf[64];
 
-    for (indent = 0; qe_isblank(str[indent]); indent++)
-        continue;
-
+    indent = cp_skip_blanks(str, 0, n);
     state = cp->colorize_state;
-
     start = i;
     c = 0;
     style = FRACTINT_STYLE_DEFAULT;
@@ -170,7 +168,7 @@ static void fractint_colorize_line(QEColorizeContext *cp,
                     break;
                 }
                 if (strequal(kbuf, "comment")) {
-                    SET_COLOR(str, start, i, FRACTINT_STYLE_PREPROCESS);
+                    SET_STYLE(sbuf, start, i, FRACTINT_STYLE_PREPROCESS);
                     start = i + 1;
                 parse_comment:
                     state |= IN_FRACTINT_COMMENT;
@@ -181,8 +179,7 @@ static void fractint_colorize_line(QEColorizeContext *cp,
                     }
                     style = FRACTINT_STYLE_COMMENT;
                 } else {
-                    eb_add_property(cp->b, cp->offset + start,
-                                    QE_PROP_TAG, qe_strdup(kbuf));
+                    eb_add_tag(cp->b, cp->offset + start, kbuf);
                     style = FRACTINT_STYLE_DEFINITION;
                 }
                 break;
@@ -272,13 +269,13 @@ static void fractint_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
  the_end:
     /* set style on eol char */
-    SET_COLOR1(str, n, style);
+    SET_STYLE1(sbuf, n, style);
 
     cp->colorize_state = state;
 }
@@ -662,7 +659,7 @@ static void fractal_set_parameters(EditState *s, FractalState *ms, const char *p
         } else
         if (strstart(p, "colors=", &p)) {
             if (!fractal_set_colors(ms, p, &p)) {
-                put_status(s, "invalid colors: %s", p);
+                put_error(s, "Invalid colors: %s", p);
                 p += strcspn(p, ", ");
             }
         } else
@@ -690,7 +687,7 @@ static void fractal_set_parameters(EditState *s, FractalState *ms, const char *p
         if (strstart(p, "y=", &p)) {
             ms->y = strtold_c(p, &p);
         } else {
-            put_status(s, "invalid parameter: %s", p);
+            put_error(s, "Invalid parameter: %s", p);
             break;
         }
     }
@@ -880,7 +877,7 @@ static void fractal_display(EditState *s) {
         }
         s->display_invalid = 0;
     }
-    if (s->qe_state->active_window == s) {
+    if (s->qs->active_window == s) {
         /* Update cursor */
         int xc = s->xleft;
         int yc = s->ytop;
@@ -926,7 +923,7 @@ static void fractal_display(EditState *s) {
         }
         s->display_invalid = 0;
     }
-    if (s->qe_state->active_window == s) {
+    if (s->qs->active_window == s) {
         /* Update cursor */
         int xc = s->xleft;
         int yc = s->ytop;
@@ -1048,7 +1045,7 @@ static void do_fractal_help(EditState *s)
     if (ms == NULL)
         return;
 
-    b = new_help_buffer();
+    b = new_help_buffer(s);
     if (!b)
         return;
 
@@ -1209,6 +1206,7 @@ static void fractal_mode_free(EditBuffer *b, void *state) {
 }
 
 static void do_mandelbrot_test(EditState *s, int argval) {
+    QEmacsState *qs = s->qs;
     EditBuffer *b;
 
     if (!fractal_mode.name) {
@@ -1225,16 +1223,12 @@ static void do_mandelbrot_test(EditState *s, int argval) {
 #if USE_BITMAP_API || USE_DRAW_PICTURE
         fractal_mode.display = fractal_display;
 #endif
-        qe_register_mode(&fractal_mode, MODEF_NOCMD | MODEF_VIEW);
-        qe_register_commands(&fractal_mode, fractal_commands, countof(fractal_commands));
+        qe_register_mode(qs, &fractal_mode, MODEF_NOCMD | MODEF_VIEW);
+        qe_register_commands(qs, &fractal_mode, fractal_commands, countof(fractal_commands));
     }
 
-    b = eb_find("*Mandelbrot*");
-    if (b) {
-        eb_clear(b);
-    } else {
-        b = eb_new("*Mandelbrot*", BF_UTF8 | BF_STYLE4);
-    }
+    // XXX: should handle multiple Mandelbrot sets for comparison
+    b = qe_new_buffer(qs, "*Mandelbrot*", BC_REUSE | BC_CLEAR | BF_UTF8 | BF_STYLE4);
     if (!b)
         return;
 
@@ -1257,10 +1251,10 @@ static const CmdDef fractal_global_commands[] = {
           do_mandelbrot_test, ESi, "p")
 };
 
-static int fractal_init(void)
+static int fractal_init(QEmacsState *qs)
 {
-    qe_register_mode(&fractint_mode, MODEF_SYNTAX);
-    qe_register_commands(NULL, fractal_global_commands, countof(fractal_global_commands));
+    qe_register_mode(qs, &fractint_mode, MODEF_SYNTAX);
+    qe_register_commands(qs, NULL, fractal_global_commands, countof(fractal_global_commands));
     return 0;
 }
 

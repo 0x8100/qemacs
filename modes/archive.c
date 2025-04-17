@@ -1,7 +1,7 @@
 /*
  * Mode for viewing archive files for QEmacs.
  *
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -41,16 +41,16 @@ struct ArchiveType {
 
 static ArchiveType archive_type_array[] = {
     { "tar", NULL, 0, "tar|tar.Z|tgz|tar.gz|tbz|tbz2|tar.bz2|tar.bzip2|"
-            "txz|tar.xz|tlz|tar.lzma|taz", "tar tvf $1" },
-    { "zip", "PK\003\004", 4, "zip|ZIP|jar|apk|bbb", "unzip -l $1" },
-    { "rar", NULL, 0, "rar|RAR", "unrar l $1" },
-    { "arj", NULL, 0, "arj|ARJ", "unarj l $1" },
-    { "cab", NULL, 0, "cab", "cabextract -l $1" },
-    { "7zip", NULL, 0, "7z", "7z l $1" },
-    { "ar", NULL, 0, "a|ar", "ar -tv $1" },
-    { "xar", NULL, 0, "xar|pkg", "xar -tvf $1" },
-    { "zoo", NULL, 0, "zoo", "zoo l $1" },
-    { "lha", NULL, 0, "lha", "lha -l $1" },
+            "txz|tar.xz|tlz|tar.lzma|taz", "tar tvf $1", NULL, 0, NULL },
+    { "zip", "PK\003\004", 4, "zip|ZIP|jar|apk|bbb", "unzip -l $1", NULL, 0, NULL },
+    { "rar", NULL, 0, "rar|RAR", "unrar l $1", NULL, 0, NULL },
+    { "arj", NULL, 0, "arj|ARJ", "unarj l $1", NULL, 0, NULL },
+    { "cab", NULL, 0, "cab", "cabextract -l $1", NULL, 0, NULL },
+    { "7zip", NULL, 0, "7z", "7z l $1", NULL, 0, NULL },
+    { "ar", NULL, 0, "a|ar", "ar -tv $1", NULL, 0, NULL },
+    { "xar", NULL, 0, "xar|pkg", "xar -tvf $1", NULL, 0, NULL },
+    { "zoo", NULL, 0, "zoo", "zoo l $1", NULL, 0, NULL },
+    { "lha", NULL, 0, "lha", "lha -l $1", NULL, 0, NULL },
 };
 
 static ArchiveType *archive_types;
@@ -149,8 +149,8 @@ static int archive_buffer_load(EditBuffer *b, FILE *f)
         eb_printf(b, "  Directory of %s archive %s\n",
                   atp->name, b->filename);
         qe_shell_subst(cmd, sizeof(cmd), atp->list_cmd, b->filename, NULL);
-        new_shell_buffer(b, NULL, get_basename(b->filename), NULL, NULL, cmd,
-                         atp->sf_flags | SF_INFINITE | SF_BUFED_MODE);
+        qe_new_shell_buffer(b->qs, b, NULL, get_basename(b->filename), NULL,
+                            NULL, cmd, atp->sf_flags | SF_INFINITE | SF_BUFED_MODE);
 
         /* XXX: should check for archiver error */
         /* XXX: should delay BF_SAVELOG until buffer is fully loaded */
@@ -189,7 +189,7 @@ static ModeDef archive_mode = {
     .data_type = &archive_data_type,
 };
 
-static int archive_init(void)
+static int archive_init(QEmacsState *qs)
 {
     int i;
 
@@ -205,8 +205,8 @@ static int archive_init(void)
     }
     archive_types = archive_type_array;
 
-    eb_register_data_type(&archive_data_type);
-    qe_register_mode(&archive_mode, MODEF_DATATYPE | MODEF_SHELLPROC);
+    qe_register_data_type(qs, &archive_data_type);
+    qe_register_mode(qs, &archive_mode, MODEF_DATATYPE | MODEF_SHELLPROC);
 
     return 0;
 }
@@ -227,22 +227,22 @@ struct CompressType {
 };
 
 static CompressType compress_type_array[] = {
-    { "gzip", NULL, 0, "gz", "gunzip -c $1", "gzip > $1" },
-    { "bzip2", NULL, 0, "bz2|bzip2", "bunzip2 -c $1", "bzip2 > $1" },
-    { "compress", NULL, 0, "Z", "uncompress -c < $1", "compress > $1" },
-    { "LZMA", NULL, 0, "lzma", "unlzma -c $1", "lzma > $1" },
-    { "XZ", NULL, 0, "xz", "unxz -c $1", "xz > $1" },
+    { "gzip", NULL, 0, "gz", "gunzip -c $1", "gzip > $1", 0, NULL },
+    { "bzip2", NULL, 0, "bz2|bzip2", "bunzip2 -c $1", "bzip2 > $1", 0, NULL },
+    { "compress", NULL, 0, "Z", "uncompress -c < $1", "compress > $1", 0, NULL },
+    { "LZMA", NULL, 0, "lzma", "unlzma -c $1", "lzma > $1", 0, NULL },
+    { "XZ", NULL, 0, "xz", "unxz -c $1", "xz > $1", 0, NULL },
     { "BinHex", NULL, 0, "hqx", "binhex decode -o /tmp/qe-$$ $1 && "
-                       "cat /tmp/qe-$$ ; rm -f /tmp/qe-$$", NULL },
-    { "sqlite", "SQLite format 3\0", 16, NULL, "sqlite3 $1 .dump", NULL },
-    { "bplist", "bplist00", 8, "plist", "plutil -p $1", NULL },
-//    { "bplist", "bplist00", 8, "plist", "plutil -convert xml1 -o - $1", NULL },
-//    { "jpeg", NULL, 0, "jpg", "jp2a --height=35 --background=dark $1", NULL, SF_COLOR },
-//    { "image", NULL, 0, "bmp", "img2txt -f utf8 $1", NULL, SF_COLOR  },
-    { "pdf", NULL, 0, "pdf", "pstotext $1", NULL },
-    { "zdump", "TZif\0\0\0\0", 8, NULL, "zdump -v $1", NULL },
+                       "cat /tmp/qe-$$ ; rm -f /tmp/qe-$$", NULL, 0, NULL },
+    { "sqlite", "SQLite format 3\0", 16, NULL, "sqlite3 $1 .dump", NULL, 0, NULL },
+    { "bplist", "bplist00", 8, "plist", "plutil -p $1", NULL, 0, NULL },
+//    { "bplist", "bplist00", 8, "plist", "plutil -convert xml1 -o - $1", NULL, 0, NULL },
+//    { "jpeg", NULL, 0, "jpg", "jp2a --height=35 --background=dark $1", NULL, SF_COLOR, NULL },
+//    { "image", NULL, 0, "bmp", "img2txt -f utf8 $1", NULL, SF_COLOR, NULL  },
+    { "pdf", NULL, 0, "pdf", "pstotext $1", NULL, 0, NULL },
+    { "zdump", "TZif\0\0\0\0", 8, NULL, "zdump -v $1", NULL, 0, NULL },
 #ifdef CONFIG_DARWIN
-    { "dylib", NULL, 0, "dylib", "nm -n $1", NULL },
+    { "dylib", NULL, 0, "dylib", "nm -n $1", NULL, 0, NULL },
 #endif
 };
 
@@ -297,8 +297,9 @@ static int compress_buffer_load(EditBuffer *b, FILE *f)
         b->data_type_name = ctp->name;
         eb_clear(b);
         qe_shell_subst(cmd, sizeof(cmd), ctp->load_cmd, b->filename, NULL);
-        new_shell_buffer(b, NULL, get_basename(b->filename), NULL, NULL, cmd,
-                         ctp->sf_flags | SF_INFINITE | SF_AUTO_CODING | SF_AUTO_MODE);
+        qe_new_shell_buffer(b->qs, b, NULL, get_basename(b->filename), NULL,
+                            NULL, cmd,
+                            ctp->sf_flags | SF_INFINITE | SF_AUTO_CODING | SF_AUTO_MODE);
         /* XXX: should check for archiver error */
         /* XXX: should delay BF_SAVELOG until buffer is fully loaded */
         b->flags |= BF_READONLY;
@@ -336,7 +337,7 @@ static ModeDef compress_mode = {
     .data_type = &compress_data_type,
 };
 
-static int compress_init(void)
+static int compress_init(QEmacsState *qs)
 {
     int i;
 
@@ -352,8 +353,8 @@ static int compress_init(void)
     }
     compress_types = compress_type_array;
 
-    eb_register_data_type(&compress_data_type);
-    qe_register_mode(&compress_mode, MODEF_DATATYPE | MODEF_SHELLPROC);
+    qe_register_data_type(qs, &compress_data_type);
+    qe_register_mode(qs, &compress_mode, MODEF_DATATYPE | MODEF_SHELLPROC);
 
     return 0;
 }
@@ -386,8 +387,8 @@ static int wget_buffer_load(EditBuffer *b, FILE *f)
 
     eb_clear(b);
     qe_shell_subst(cmd, sizeof(cmd), "wget -q -O - $1", b->filename, NULL);
-    new_shell_buffer(b, NULL, get_basename(b->filename), NULL, NULL, cmd,
-                     SF_INFINITE | SF_AUTO_CODING | SF_AUTO_MODE);
+    qe_new_shell_buffer(b->qs, b, NULL, get_basename(b->filename), NULL,
+                        NULL, cmd, SF_INFINITE | SF_AUTO_CODING | SF_AUTO_MODE);
     /* XXX: should refilter by content type */
     /* XXX: should have a way to keep http headers --save-headers */
     /* XXX: should check for wget error */
@@ -417,7 +418,7 @@ static EditBufferDataType wget_data_type = {
     NULL, /* next */
 };
 
-static int wget_init(void)
+static int wget_init(QEmacsState *qs)
 {
     /* copy and patch text_mode */
     // XXX: remove this mess
@@ -426,8 +427,8 @@ static int wget_init(void)
     wget_mode.mode_probe = wget_mode_probe;
     wget_mode.data_type = &wget_data_type;
 
-    eb_register_data_type(&wget_data_type);
-    qe_register_mode(&wget_mode, MODEF_DATATYPE | MODEF_SHELLPROC);
+    qe_register_data_type(qs, &wget_data_type);
+    qe_register_mode(qs, &wget_mode, MODEF_DATATYPE | MODEF_SHELLPROC);
 
     return 0;
 }
@@ -480,8 +481,8 @@ static int man_buffer_load(EditBuffer *b, FILE *f)
 
     eb_clear(b);
     qe_shell_subst(cmd, sizeof(cmd), "man $1", b->filename, NULL);
-    new_shell_buffer(b, NULL, get_basename(b->filename), NULL, NULL, cmd,
-                     SF_COLOR | SF_INFINITE);
+    qe_new_shell_buffer(b->qs, b, NULL, get_basename(b->filename), NULL,
+                        NULL, cmd, SF_COLOR | SF_INFINITE);
     /* XXX: should check for man error */
     /* XXX: should delay BF_SAVELOG until buffer is fully loaded */
     b->flags |= BF_READONLY;
@@ -509,7 +510,7 @@ static EditBufferDataType man_data_type = {
     NULL, /* next */
 };
 
-static int man_init(void)
+static int man_init(QEmacsState *qs)
 {
     /* copy and patch text_mode */
     // XXX: remove this mess
@@ -518,20 +519,20 @@ static int man_init(void)
     man_mode.mode_probe = man_mode_probe;
     man_mode.data_type = &man_data_type;
 
-    eb_register_data_type(&man_data_type);
-    qe_register_mode(&man_mode, MODEF_DATATYPE | MODEF_SHELLPROC);
+    qe_register_data_type(qs, &man_data_type);
+    qe_register_mode(qs, &man_mode, MODEF_DATATYPE | MODEF_SHELLPROC);
 
     return 0;
 }
 
 /*---------------- Initialization ----------------*/
 
-static int archive_compress_init(void)
+static int archive_compress_init(QEmacsState *qs)
 {
-    return archive_init() ||
-            compress_init() ||
-            wget_init() ||
-            man_init();
+    return archive_init(qs) ||
+            compress_init(qs) ||
+            wget_init(qs) ||
+            man_init(qs);
 }
 
 qe_module_init(archive_compress_init);

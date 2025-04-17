@@ -15,9 +15,9 @@ static const CmdDef my_commands[] = {
           insert_hello, ES, "*")
 };
 
-static int my_plugin_init(void) {
+static int my_plugin_init(QEmacsState *qs) {
     /* commands and default keys */
-    qe_register_commands(NULL, my_commands, countof(my_commands));
+    qe_register_commands(qs, NULL, my_commands, countof(my_commands));
     return 0;
 }
 

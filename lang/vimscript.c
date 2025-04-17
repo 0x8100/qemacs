@@ -1,7 +1,7 @@
 /*
  * Vim script mode for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -107,14 +107,13 @@ static int is_vim_keyword(const char32_t *str, int from, int to,
 }
 
 static void vim_colorize_line(QEColorizeContext *cp,
-                              char32_t *str, int n, ModeDef *syn)
+                              const char32_t *str, int n,
+                              QETermStyle *sbuf, ModeDef *syn)
 {
     int i = 0, j, start, state, comm, level, style;
     char32_t c;
 
-    while (qe_isblank(str[i])) {
-        i++;
-    }
+    i = cp_skip_blanks(str, i, n);
     if (str[i] == '\\') {
         i++;
         level = cp->colorize_state & 15;
@@ -137,7 +136,7 @@ static void vim_colorize_line(QEColorizeContext *cp,
                 if (str[i++] == c)
                     break;
             }
-            SET_COLOR(str, start, i, VIM_STYLE_STRING);
+            SET_STYLE(sbuf, start, i, VIM_STYLE_STRING);
             continue;
         case '/':
             if (state == VIM_STATE_SYN
@@ -150,7 +149,7 @@ static void vim_colorize_line(QEColorizeContext *cp,
                     if (str[i++] == c)
                         break;
                 }
-                SET_COLOR(str, start, i, VIM_STYLE_REGEX);
+                SET_STYLE(sbuf, start, i, VIM_STYLE_REGEX);
                 continue;
             }
             break;
@@ -161,7 +160,7 @@ static void vim_colorize_line(QEColorizeContext *cp,
                 for (j = i; j < n;) {
                     if (str[j++] == c) {
                         i = j;
-                        SET_COLOR(str, start, i, VIM_STYLE_STRING);
+                        SET_STYLE(sbuf, start, i, VIM_STYLE_STRING);
                         break;
                     }
                 }
@@ -171,7 +170,7 @@ static void vim_colorize_line(QEColorizeContext *cp,
         case '\"':
             if (comm) {
                 i = n;
-                SET_COLOR(str, start, i, VIM_STYLE_COMMENT);
+                SET_STYLE(sbuf, start, i, VIM_STYLE_COMMENT);
                 continue;
             }
             /* parse string const */
@@ -185,7 +184,7 @@ static void vim_colorize_line(QEColorizeContext *cp,
                     break;
                 }
             }
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             continue;
         case '|':
             if (str[i] == '|') {
@@ -219,7 +218,7 @@ static void vim_colorize_line(QEColorizeContext *cp,
                 if (!qe_isalnum(str[i]) && str[i] != '.')
                     break;
             }
-            SET_COLOR(str, start, i, VIM_STYLE_NUMBER);
+            SET_STYLE(sbuf, start, i, VIM_STYLE_NUMBER);
             continue;
         }
         /* parse identifiers and keywords */
@@ -254,7 +253,7 @@ static void vim_colorize_line(QEColorizeContext *cp,
                 if (check_fcall(str, i))
                     style = VIM_STYLE_FUNCTION;
             }
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             continue;
         }
     }
@@ -267,10 +266,9 @@ static ModeDef vim_mode = {
     .colorize_func = vim_colorize_line,
 };
 
-static int vim_init(void)
+static int vim_init(QEmacsState *qs)
 {
-    qe_register_mode(&vim_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &vim_mode, MODEF_SYNTAX);
     return 0;
 }
 

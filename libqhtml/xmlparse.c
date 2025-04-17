@@ -2,6 +2,7 @@
  * XML/HTML parser for qemacs.
  *
  * Copyright (c) 2000-2002 Fabrice Bellard.
+ * Copyright (c) 2007-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -162,10 +163,10 @@ enum XMLParseState {
 
 /* string buffer optimized for strings lengths <= STRING_BUF_SIZE */
 typedef struct StringBuffer {
-    unsigned char *buf;
+    char *buf;
     int allocated_size;
     int size;
-    unsigned char buf1[STRING_BUF_SIZE];
+    char buf1[STRING_BUF_SIZE];
 } StringBuffer;
 
 static inline void strbuf_init(StringBuffer *b)
@@ -185,27 +186,27 @@ static inline void strbuf_reset(StringBuffer *b)
 static void strbuf_addch1(StringBuffer *b, char32_t ch)
 {
     int size1;
-    unsigned char *ptr;
+    char *ptr;
 
     size1 = b->allocated_size + STRING_BUF_SIZE;
     ptr = b->buf;
     if (b->buf == b->buf1)
         ptr = NULL;
-    if (qe_realloc(&ptr, size1)) {
+    if (qe_realloc_bytes(&ptr, size1)) {
         if (b->buf == b->buf1)
             memcpy(ptr, b->buf1, STRING_BUF_SIZE);
         b->buf = ptr;
         b->allocated_size = size1;
 
-        b->size += utf8_encode((char*)b->buf + b->size, ch);
+        b->size += utf8_encode(b->buf + b->size, ch);
     }
 }
 
 static inline void strbuf_addch(StringBuffer *b, char32_t ch)
 {
-    if (b->size < b->allocated_size) {
+    if (b->size + UTF8_CHAR_LEN_MAX < b->allocated_size) {
         /* fast case */
-        b->size += utf8_encode((char*)b->buf + b->size, ch);
+        b->size += utf8_encode(b->buf + b->size, ch);
     } else {
         strbuf_addch1(b, ch);
     }
@@ -251,7 +252,7 @@ static void offsetbuf_add(OffsetBuffer *b, unsigned int offset)
             if (!n)
                 n = 1;
             n = n * 2;
-            if (!qe_realloc(&b->offsets, n * sizeof(unsigned int)))
+            if (!qe_realloc_array(&b->offsets, n))
                 return;
             b->nb_allocated_offsets = n;
         }
@@ -283,6 +284,7 @@ struct XMLState {
     int pretaglen;
     char pretag[32]; /* current tag in XML_STATE_PRETAG */
     StringBuffer str;
+    void *error_opaque;
     char filename[MAX_FILENAME_SIZE];
     CharsetDecodeState charset_state;
 };
@@ -291,7 +293,8 @@ struct XMLState {
 
 XMLState *xml_begin(CSSStyleSheet *style_sheet, int flags,
                     CSSAbortFunc *abort_func, void *abort_opaque,
-                    const char *filename, QECharset *charset)
+                    void *error_opaque, const char *filename,
+                    QECharset *charset)
 {
     XMLState *s;
 
@@ -310,6 +313,7 @@ XMLState *xml_begin(CSSStyleSheet *style_sheet, int flags,
     s->abort_opaque = abort_opaque;
     s->base_font = 3;
     s->line_num = 1;
+    s->error_opaque = error_opaque;
     pstrcpy(s->filename, sizeof(s->filename), filename);
     s->charset = charset;
     if (charset) {
@@ -786,10 +790,10 @@ static void html_eval_tag(XMLState *s, CSSBox *box)
     value = css_attr_str(box, CSS_ID_style);
     if (value) {
         CSSParseState b1, *b = &b1;
-
+        b->error_opaque = s->error_opaque;
         b->ptr = NULL;
-        b->line_num = s->line_num; /* XXX: slightly incorrect */
         b->filename = s->filename;
+        b->line_num = s->line_num; /* XXX: slightly incorrect */
         b->ignore_case = s->ignore_case;
         *last_prop = css_parse_properties(b, value);
     }
@@ -797,7 +801,7 @@ static void html_eval_tag(XMLState *s, CSSBox *box)
 }
 
 static void xml_error(XMLState *s, const char *fmt, ...)
-        qe__attr_printf(2,3);
+    qe__attr_printf(2,3);
 
 static void xml_error(XMLState *s, const char *fmt, ...)
 {
@@ -806,8 +810,8 @@ static void xml_error(XMLState *s, const char *fmt, ...)
 
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
-    css_error(s->filename, s->line_num, buf);
     va_end(ap);
+    css_error(s->error_opaque, s->filename, s->line_num, buf);
 }
 
 /* XXX: avoid using strings in tag_closed and generalize */
@@ -1116,7 +1120,7 @@ static int xml_parse_internal(XMLState *s, const char *buf_start, int buf_len,
         case XML_STATE_TAG:
             if (ch == '>') {
                 strbuf_addch(&s->str, '\0');
-                ret = parse_tag(s, (char *)s->str.buf);
+                ret = parse_tag(s, s->str.buf);
                 switch (ret) {
                 default:
                 case XML_STATE_TEXT:
@@ -1148,7 +1152,7 @@ static int xml_parse_internal(XMLState *s, const char *buf_start, int buf_len,
                    not flush if comment */
                 if (buf) {
                     strbuf_addch(&s->str, '\0');
-                    flush_text(s, (char *)s->str.buf);
+                    flush_text(s, s->str.buf);
                     strbuf_reset(&s->str);
                 } else {
                     flush_text_buffer(s, b, text_offset_start, offset0);
@@ -1192,15 +1196,16 @@ static int xml_parse_internal(XMLState *s, const char *buf_start, int buf_len,
                 if (len >= 0 &&
                     s->str.buf[len] == '<' &&
                     s->str.buf[len + 1] == '/' &&
-                    !xml_tagcmp((char *)s->str.buf + len + 2, s->pretag)) {
+                    !xml_tagcmp(s->str.buf + len + 2, s->pretag)) {
                     s->str.buf[len] = '\0';
 
                     if (!xml_tagcmp(s->pretag, "style")) {
                         if (s->style_sheet) {
                             CSSParseState b1, *bp = &b1;
-                            bp->ptr = (char *)s->str.buf;
-                            bp->line_num = s->line_num; /* XXX: incorrect */
+                            bp->error_opaque = s->error_opaque;
+                            bp->ptr = s->str.buf;
                             bp->filename = s->filename;
+                            bp->line_num = s->line_num; /* XXX: incorrect */
                             bp->ignore_case = s->ignore_case;
                             css_parse_style_sheet(s->style_sheet, bp);
                         }
@@ -1209,7 +1214,7 @@ static int xml_parse_internal(XMLState *s, const char *buf_start, int buf_len,
                     } else {
                         /* just add the content */
                         if (buf) {
-                            flush_text(s, (char *)s->str.buf);
+                            flush_text(s, s->str.buf);
                         } else {
                             /* XXX: would be incorrect if non ascii chars */
                             flush_text_buffer(s, b, text_offset_start, offset - taglen);
@@ -1321,13 +1326,14 @@ CSSBox *xml_end(XMLState **sp)
 CSSBox *xml_parse_buffer(struct EditBuffer *b, const char *name,
                          int offset_start, int offset_end,
                          CSSStyleSheet *style_sheet, int flags,
-                         CSSAbortFunc *abort_func, void *abort_opaque)
+                         CSSAbortFunc *abort_func, void *abort_opaque,
+                         void *error_opaque)
 {
     XMLState *s;
     CSSBox *box;
     int ret;
 
-    s = xml_begin(style_sheet, flags, abort_func, abort_opaque, name, NULL);
+    s = xml_begin(style_sheet, flags, abort_func, abort_opaque, error_opaque, name, NULL);
     ret = xml_parse_internal(s, NULL, offset_end - offset_start, b, offset_start);
     box = xml_end(&s);
     if (ret < 0) {

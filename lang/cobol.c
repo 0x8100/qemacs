@@ -1,7 +1,7 @@
 /*
  * Cobol language mode for QEmacs.
  *
- * Copyright (c) 2015-2023 Charlie Gordon.
+ * Copyright (c) 2015-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -86,15 +86,15 @@ enum {
 };
 
 static void cobol_colorize_line(QEColorizeContext *cp,
-                                char32_t *str, int n, ModeDef *syn)
+                                const char32_t *str, int n,
+                                QETermStyle *sbuf, ModeDef *syn)
 {
     char keyword[COBOL_KEYWORD_SIZE];
     int i = 0, start = i, j, style, len, indent, heading = 0, preproc = 0, comment = -1;
     char32_t c;
     int state = cp->colorize_state;
 
-    for (; i < n && qe_isblank(str[i]); i++)
-        continue;
+    i = cp_skip_blanks(str, i, n);
     indent = i;
 
     if (str[i] == '*' && str[i + 1] == '>')
@@ -119,7 +119,7 @@ static void cobol_colorize_line(QEColorizeContext *cp,
                 }
                 if (preproc) {
                     i = n;
-                    SET_COLOR(str, start, i, COBOL_STYLE_PREPROCESS);
+                    SET_STYLE(sbuf, start, i, COBOL_STYLE_PREPROCESS);
                 }
             } else {
                 if (comment >= 0 && comment < 6) {
@@ -139,7 +139,7 @@ static void cobol_colorize_line(QEColorizeContext *cp,
         }
         if ((state & IN_COBOL_FIXED_FORMAT) || heading || i == 6) {
             i = heading = 6;
-            SET_COLOR(str, start, i, COBOL_STYLE_HEADING);
+            SET_STYLE(sbuf, start, i, COBOL_STYLE_HEADING);
         }
     }
 
@@ -216,7 +216,7 @@ static void cobol_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -251,10 +251,9 @@ static ModeDef cobol_mode = {
     .colorize_func = cobol_colorize_line,
 };
 
-static int cobol_init(void)
+static int cobol_init(QEmacsState *qs)
 {
-    qe_register_mode(&cobol_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &cobol_mode, MODEF_SYNTAX);
     return 0;
 }
 

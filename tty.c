@@ -2,7 +2,7 @@
  * TTY Terminal handling for QEmacs
  *
  * Copyright (c) 2000-2001 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -108,7 +108,8 @@ enum InputState {
     IS_ESC,
     IS_CSI,
     IS_CSI2,
-    IS_ESC2,
+    IS_SS3,
+    IS_OSC,
 };
 
 enum TermCode {
@@ -119,21 +120,50 @@ enum TermCode {
     TERM_LINUX,
     TERM_CYGWIN,
     TERM_TW100,
+    TERM_SCREEN,
+    TERM_QEMACS,
+    TERM_ITERM,
+    TERM_ITERM2,
+    TERM_WEZTERM,
+    TERM_APPLE_TERMINAL,
+};
+
+static const char * const term_code_name[] = {
+    "UNKNOWN",
+    "ANSI",
+    "VT100",
+    "XTERM",
+    "LINUX",
+    "CYGWIN",
+    "TW100",
+    "SCREEN",
+    "QEMACS",
+    "ITERM",
+    "ITERM2",
+    "WEZTERM",
+    "APPLE_TERMINAL",
 };
 
 typedef struct TTYState {
     TTYChar *screen;
     int screen_size;
     unsigned char *line_updated;
+    struct termios newtty;
     struct termios oldtty;
     int cursor_x, cursor_y;
     /* input handling */
     enum InputState input_state;
+    u8 last_ch, this_ch;
     int has_meta;
-    int input_param, input_param2;
+    int nb_params;
+#define CSI_PARAM_OMITTED  0x80000000
+    int params[3];
+    int leader;
+    int interm;
     int utf8_index;
     unsigned char buf[8];
-    char *term_name;
+    const char *term_name;
+    const char *term_program;
     enum TermCode term_code;
     int term_flags;
 #define KBS_CONTROL_H           0x01
@@ -153,6 +183,9 @@ typedef struct TTYState {
     /* cache for glyph combinations */
     // XXX: should keep track of max_comb and max_max_comb
     char32_t comb_cache[COMB_CACHE_SIZE];
+    char *clipboard;
+    size_t clipboard_size;
+    int got_focus;
 } TTYState;
 
 static QEditScreen *tty_screen;   /* for tty_term_exit and tty_term_resize */
@@ -160,15 +193,99 @@ static QEditScreen *tty_screen;   /* for tty_term_exit and tty_term_resize */
 static void tty_dpy_invalidate(QEditScreen *s);
 
 static void tty_term_resize(int sig);
+static void tty_term_suspend(int sig);
+static void tty_term_resume(int sig);
 static void tty_term_exit(void);
 static void tty_read_handler(void *opaque);
+
+static void tty_term_set_raw(QEditScreen *s) {
+    TTYState *ts;
+
+    if (!s)
+        return;
+
+    ts = s->priv_data;
+
+    /* First switch to full screen mode */
+#if 0
+    printf("\033[?1048h\033[?1047h"     /* enable cup */
+           "\033)0\033(B"       /* select character sets in block 0 and 1 */
+           "\017");             /* shift out */
+#else
+    TTY_FPRINTF(s->STDOUT,
+                "\033[?1049h"       /* enter_ca_mode */
+                "\033[m\033(B"      /* exit_attribute_mode */
+                "\033[4l"           /* exit_insert_mode */
+                "\033[?7h"          /* enter_am_mode (autowrap on) */
+                "\033[39;49m"       /* orig_pair */
+                "\033[?1h\033="     /* keypad_xmit */
+               );
+    if (tty_mk > 0) {
+        /* modifyOtherKeys: report shift states */
+        TTY_FPRINTF(s->STDOUT, "\033[>4;%dm", tty_mk);
+    }
+    if (tty_mouse > 0) {
+        /* enable mouse reporting using SGR */
+        TTY_FPRINTF(s->STDOUT, "\033[?%d;1006h", tty_mouse == 1 ? 1002 : 1003);
+    }
+    if (tty_mouse > 0 || tty_clipboard > 0) {
+        /* enable focus reporting */
+        TTY_FPRINTF(s->STDOUT, "\033[?1004h");
+    }
+#endif
+    fflush(s->STDOUT);
+    tcsetattr(fileno(s->STDIN), TCSANOW, &ts->newtty);
+}
+
+static void tty_term_set_cooked(QEditScreen *s) {
+    TTYState *ts;
+
+    if (!s)
+        return;
+
+    ts = s->priv_data;
+#if 0
+    /* go to the last line */
+    printf("\033[%d;%dH\033[m\033[K"
+           "\033[?1047l\033[?1048l",    /* disable cup */
+           s->height, 1);
+#else
+    /* go to last line and clear it */
+    TTY_FPRINTF(s->STDOUT, "\033[%d;%dH" "\033[m\033[K", s->height, 1);
+    TTY_FPRINTF(s->STDOUT,
+                "\033[?1049l"       /* exit_ca_mode */
+                "\033[?1l\033>"     /* keypad_local */
+                "\033[?25h"         /* show cursor */
+                "\r\033[m\033[K"    /* return erase eol */
+                );
+    if (tty_mk > 0) {
+        /* reset modifyOtherKeys: report regular control characters */
+        TTY_FPRINTF(s->STDOUT, "\033[>4m");
+    }
+    if (tty_mouse > 0) {
+        /* disable mouse reporting using SGR */
+        TTY_FPRINTF(s->STDOUT, "\033[?%d;1006l", tty_mouse == 1 ? 1002 : 1003);
+    }
+    if (tty_mouse > 0 || tty_clipboard > 0) {
+        /* disable focus reporting */
+        TTY_FPRINTF(s->STDOUT, "\033[?1004l");
+    }
+#endif
+    fflush(s->STDOUT);
+    tcsetattr(fileno(s->STDIN), TCSANOW, &ts->oldtty);
+}
 
 static int tty_dpy_probe(void)
 {
     return 1;
 }
 
-static int tty_dpy_init(QEditScreen *s,
+static const char *getenv1(const char *name) {
+    const char *p = getenv(name);
+    return p ? p : "";
+}
+
+static int tty_dpy_init(QEditScreen *s, QEmacsState *qs,
                         qe__unused__ int w, qe__unused__ int h)
 {
     TTYState *ts;
@@ -182,6 +299,7 @@ static int tty_dpy_init(QEditScreen *s,
     }
 
     tty_screen = s;
+    s->qs = qs;
     s->STDIN = stdin;
     s->STDOUT = stdout;
     s->priv_data = ts;
@@ -194,6 +312,7 @@ static int tty_dpy_init(QEditScreen *s,
     ts->term_fg_colors_count = 16;
     ts->term_bg_colors_count = 16;
 
+    ts->term_program = getenv("TERM_PROGRAM");
     ts->term_name = getenv("TERM");
     if (ts->term_name) {
         /* linux and xterm -> kbs=\177
@@ -207,7 +326,7 @@ static int tty_dpy_init(QEditScreen *s,
             ts->term_code = TERM_VT100;
             ts->term_flags |= KBS_CONTROL_H;
         } else
-        if (strstart(ts->term_name, "xterm", NULL)) {
+        if (strstart(ts->term_name, "xterm", NULL) || getenv("XTERM_VERSION")) {
             ts->term_code = TERM_XTERM;
         } else
         if (strstart(ts->term_name, "linux", NULL)) {
@@ -222,15 +341,84 @@ static int tty_dpy_init(QEditScreen *s,
             ts->term_code = TERM_TW100;
             ts->term_flags |= KBS_CONTROL_H |
                               USE_BOLD_AS_BRIGHT_FG | USE_BLINK_AS_BRIGHT_BG;
+        } else
+        if (strstart(ts->term_name, "screen", NULL)) {
+            ts->term_code = TERM_SCREEN;
         }
     }
-    if (strstr(ts->term_name, "true") || strstr(ts->term_name, "24")) {
-        ts->term_flags |= USE_TRUE_COLORS | USE_256_COLORS;
+
+    /* Use alternate environment variables */
+    // OSTYPE=darwin23
+    // TERM_PROGRAM=Apple_Terminal / TERM_PROGRAM_VERSION=453
+    // TERM_PROGRAM=iTerm.app / TERM_PROGRAM_VERSION=3.5.5
+    //    LC_TERMINAL=iTerm2 / LC_TERMINAL_VERSION=3.5.5
+    // XTERM_LOCALE=C / XTERM_VERSION='XTerm(378)'
+    // TERM_PROGRAM=WezTerm / TERM_PROGRAM_VERSION=20240203-110809-5046fc22
+    // TERM_PROGRAM=qemacs / TERM_PROGRAM_VERSION=6.3.2
+
+    if (ts->term_program) {
+        /* This mostly works for local use, remote connections typically
+         * do not set the TERM_PROGRAM variable.
+         */
+        // TODO: should query terminal capabilities
+        if (strequal(ts->term_program, "iTerm.app")) {
+            ts->term_code = TERM_ITERM;
+            if (strequal(getenv1("LC_TERMINAL"), "iTerm2"))
+                ts->term_code = TERM_ITERM2;
+        } else
+        if (strequal(ts->term_program, "WezTerm")) {
+            ts->term_code = TERM_WEZTERM;
+        } else
+        if (strequal(ts->term_program, "qemacs")) {
+            ts->term_code = TERM_QEMACS;
+        } else
+        if (strequal(ts->term_program, "Apple_Terminal")) {
+            ts->term_code = TERM_APPLE_TERMINAL;
+        }
     }
-    if (strstr(ts->term_name, "256")) {
-        ts->term_flags |= USE_256_COLORS;
+    switch (ts->term_code) {
+    case TERM_XTERM:
+    case TERM_ITERM:
+    case TERM_ITERM2:
+    case TERM_WEZTERM:
+        if (tty_mk < 0)
+            tty_mk = 2;
+        if (tty_mouse < 0)
+            tty_mouse = 1;
+        if (tty_clipboard < 0)
+            tty_clipboard = 1;
+        break;
+    case TERM_APPLE_TERMINAL:
+        if (tty_mouse < 0)
+            tty_mouse = 1;
+#ifdef CONFIG_DARWIN
+        /* use pbcopy / pbpaste if running natively */
+        if (tty_clipboard < 0)
+            tty_clipboard = 2;
+#endif
+        break;
+    case TERM_QEMACS:
+    case TERM_SCREEN:
+        if (tty_mk < 0)
+            tty_mk = 0;
+        if (tty_mouse < 0)
+            tty_mouse = 0;
+        if (tty_clipboard < 0)
+            tty_clipboard = 0;
+        break;
+    default:
+        break;
     }
-    if ((p = getenv("TERM_PROGRAM")) && strequal(p, "iTerm.app")) {
+
+    if (ts->term_name) {
+        if (strstr(ts->term_name, "true") || strstr(ts->term_name, "24")) {
+            ts->term_flags |= USE_TRUE_COLORS | USE_256_COLORS;
+        }
+        if (strstr(ts->term_name, "256")) {
+            ts->term_flags |= USE_256_COLORS;
+        }
+    }
+    if (ts->term_code == TERM_ITERM || ts->term_code == TERM_ITERM2) {
         /* iTerm and iTerm2 support true colors */
         ts->term_flags |= USE_TRUE_COLORS | USE_256_COLORS;
     }
@@ -298,33 +486,20 @@ static int tty_dpy_init(QEditScreen *s,
      * We want read to return every single byte, without timeout. */
     tty.c_cc[VMIN] = 1;   /* 1 byte */
     tty.c_cc[VTIME] = 0;  /* no timer */
+    if (tty.c_cc[VERASE] == 8)
+        ts->term_flags |= KBS_CONTROL_H;
 
-    tcsetattr(fileno(s->STDIN), TCSANOW, &tty);
-
-    /* First switch to full screen mode */
-#if 0
-    printf("\033[?1048h\033[?1047h"     /* enable cup */
-           "\033)0\033(B"       /* select character sets in block 0 and 1 */
-           "\017");             /* shift out */
-#else
-    TTY_FPRINTF(s->STDOUT,
-                "\033[?1049h"       /* enter_ca_mode */
-                "\033[m\033(B"      /* exit_attribute_mode */
-                "\033[4l"           /* exit_insert_mode */
-                "\033[?7h"          /* enter_am_mode (autowrap on) */
-                "\033[39;49m"       /* orig_pair */
-                "\033[?1h\033="     /* keypad_xmit */
-               );
-#endif
+    ts->newtty = tty;
+    tty_term_set_raw(s);
 
     /* Get charset from command line option */
-    s->charset = find_charset(qe_state.tty_charset);
+    s->charset = qe_find_charset(qs, qs->tty_charset);
 
     if (ts->term_code == TERM_CYGWIN)
         s->charset = &charset_8859_1;
 
     if (ts->term_code == TERM_TW100)
-        s->charset = find_charset("atarist");
+        s->charset = qe_find_charset(qs, "atarist");
 
     // XXX: default charset for non tty invocations should be UTF-8
     if (!s->charset && !isatty(fileno(s->STDOUT)))
@@ -402,7 +577,7 @@ static int tty_dpy_init(QEditScreen *s,
             s->charset = &charset_utf8;
         }
     }
-    put_status(NULL, "tty charset: %s", s->charset->name);
+    put_status(qs->active_window, "TTY charset: %s", s->charset->name);
 
     atexit(tty_term_exit);
 
@@ -410,6 +585,11 @@ static int tty_dpy_init(QEditScreen *s,
     sigemptyset(&sig.sa_mask);
     sig.sa_flags = 0;
     sigaction(SIGWINCH, &sig, NULL);
+    sig.sa_handler = tty_term_suspend;
+    sigaction(SIGTSTP, &sig, NULL);
+    sig.sa_handler = tty_term_resume;
+    sigaction(SIGCONT, &sig, NULL);
+
     fcntl(fileno(s->STDIN), F_SETFL, O_NONBLOCK);
     /* If stdout is to a pty, make sure we aren't in nonblocking mode.
      * Otherwise, the printf()s in term_flush() can fail with EAGAIN,
@@ -421,10 +601,11 @@ static int tty_dpy_init(QEditScreen *s,
 
     tty_dpy_invalidate(s);
 
+#if 0
     if (ts->term_flags & KBS_CONTROL_H) {
-        do_toggle_control_h(NULL, 1);
+        qe_toggle_control_h(qs, 1);
     }
-
+#endif
     return 0;
 }
 
@@ -433,27 +614,18 @@ static void tty_dpy_close(QEditScreen *s)
     TTYState *ts = s->priv_data;
 
     fcntl(fileno(s->STDIN), F_SETFL, 0);
-#if 0
-    /* go to the last line */
-    printf("\033[%d;%dH\033[m\033[K"
-           "\033[?1047l\033[?1048l",    /* disable cup */
-           s->height, 1);
-#else
-    /* go to last line and clear it */
-    TTY_FPRINTF(s->STDOUT, "\033[%d;%dH" "\033[m\033[K", s->height, 1);
-    TTY_FPRINTF(s->STDOUT,
-                "\033[?1049l"       /* exit_ca_mode */
-                "\033[?1l\033>"     /* keypad_local */
-                "\033[?25h"         /* show cursor */
-                "\r\033[m\033[K"    /* return erase eol */
-               );
-#endif
-    fflush(s->STDOUT);
-    tcsetattr(fileno(s->STDIN), TCSANOW, &ts->oldtty);
+
+    tty_term_set_cooked(s);
 
     qe_free(&ts->screen);
     qe_free(&ts->line_updated);
+    qe_free(&ts->clipboard);
     qe_free(&s->priv_data);
+}
+
+static void tty_dpy_suspend(QEditScreen *s)
+{
+    kill(getpid(), SIGTSTP);
 }
 
 static void tty_term_exit(void)
@@ -466,6 +638,19 @@ static void tty_term_exit(void)
             tcsetattr(fileno(s->STDIN), TCSANOW, &ts->oldtty);
         }
     }
+}
+
+static void tty_term_suspend(qe__unused__ int sig)
+{
+    tty_term_set_cooked(tty_screen);
+
+    kill(getpid(), SIGSTOP);
+}
+
+static void tty_term_resume(qe__unused__ int sig)
+{
+    tty_term_set_raw(tty_screen);
+    tty_term_resize(0);
 }
 
 static void tty_term_resize(qe__unused__ int sig)
@@ -518,8 +703,9 @@ static void tty_dpy_invalidate(QEditScreen *s)
     count = s->width * s->height;
     size = count * sizeof(TTYChar);
     /* screen buffer + shadow buffer + extra slot for loop guard */
-    qe_realloc(&ts->screen, size * 2 + sizeof(TTYChar));
-    qe_realloc(&ts->line_updated, s->height);
+    // XXX: test for failure
+    qe_realloc_array(&ts->screen, count * 2 + 1);
+    qe_realloc_array(&ts->line_updated, s->height);
     ts->screen_size = count;
 
     /* Erase shadow buffer to impossible value */
@@ -559,6 +745,154 @@ static int tty_dpy_is_user_input_pending(QEditScreen *s)
         return 1;
     else
         return 0;
+}
+
+static int tty_get_clipboard(QEditScreen *s, int ch)
+{
+    QEmacsState *qs = s->qs;
+    TTYState *ts = s->priv_data;
+    EditBuffer *b;
+    size_t size;
+    char *contents;
+
+    // OSC 52;Ps;string ST  report clipboard contents
+    const char *p1 = cs8(qs->input_buf) + 2;
+    const char *p4 = cs8(qs->input_buf) + qs->input_len - 1 - (ch != 7);
+    const char *p2 = strchr(p1, ';');
+    const char *p3 = NULL;
+    if (p2 == NULL)
+        return -1;
+    p2++;
+    p3 = strchr(p2, ';');
+    if (p3 == NULL)
+        return -1;
+    p3++;
+    if (p3 >= p4)
+        return -1;
+
+    contents = qe_decode64(p3, p4 - p3, &size);
+    if (!contents)
+        return -1;
+    if (qs->trace_buffer)
+        qe_trace_bytes(qs, contents, size, EB_TRACE_CLIPBOARD);
+    if (size == ts->clipboard_size && !memcmp(ts->clipboard, contents, size)) {
+        qe_free(&contents);
+        return 0;
+    } else {
+        qe_free(&ts->clipboard);
+        ts->clipboard = contents;
+        ts->clipboard_size = size;
+        /* copy terminal selection a new yank buffer */
+        b = qe_new_yank_buffer(qs, NULL);
+        eb_set_charset(b, &charset_utf8, EOL_UNIX);
+        eb_write(b, 0, contents, size);
+        return 1;
+    }
+}
+
+static int tty_request_clipboard(QEditScreen *s)
+{
+    if (tty_clipboard == 1) {
+        qe_trace_bytes(s->qs, "tty-request-clipboard", -1, EB_TRACE_COMMAND);
+        TTY_FPUTS("\033]52;;?\007", s->STDOUT);
+        fflush(s->STDOUT);
+        // FIXME: should read tty response with a 100ms timeout
+        return 1;
+    }
+#ifdef CONFIG_DARWIN
+    if (tty_clipboard == 2) {
+        QEmacsState *qs = s->qs;
+        TTYState *ts = s->priv_data;
+        FILE *fp;
+        char *contents = NULL;
+        size_t size = 0, allocated_size = 0;
+        int c;
+        EditBuffer *b;
+        qe_trace_bytes(qs, "pbpaste", -1, EB_TRACE_COMMAND);
+        fp = popen("pbpaste", "r");
+        if (fp == NULL) {
+            qe_trace_bytes(qs, "failed", -1, EB_TRACE_COMMAND);
+            qe_free(&contents);
+            return -1;
+        }
+        // FIXME: should have a timeout?
+        while ((c = getc(fp)) != EOF) {
+            if (size == allocated_size) {
+                allocated_size += allocated_size / 2 + 32;
+                qe_realloc_array(&contents, allocated_size);
+            }
+            contents[size++] = (char)c;
+        }
+        pclose(fp);
+        if (qs->trace_buffer)
+            qe_trace_bytes(qs, contents, size, EB_TRACE_CLIPBOARD);
+        if (size == ts->clipboard_size && !memcmp(ts->clipboard, contents, size)) {
+            qe_free(&contents);
+            return 0;
+        }
+        qe_free(&ts->clipboard);
+        ts->clipboard = contents;
+        ts->clipboard_size = size;
+        /* copy terminal selection a new yank buffer */
+        b = qe_new_yank_buffer(qs, NULL);
+        eb_set_charset(b, &charset_utf8, EOL_UNIX);
+        eb_write(b, 0, contents, size);
+        return 1;
+    }
+#endif
+    return -1;
+}
+
+static int tty_set_clipboard(QEditScreen *s)
+{
+    // TODO: make this selectable
+    QEmacsState *qs = s->qs;
+    TTYState *ts = s->priv_data;
+    EditBuffer *b = qs->yank_buffers[qs->yank_current];
+    size_t size;
+    char *contents;
+
+    if (!b)
+        return 0;
+    size = eb_get_region_content_size(b, 0, b->total_size);
+    contents = qe_malloc_bytes(size + 1);
+    if (!contents)
+        return -1;
+    eb_get_region_contents(b, 0, b->total_size, contents, size + 1, FALSE);
+    if (size == ts->clipboard_size && !memcmp(ts->clipboard, contents, size)) {
+        qe_free(&contents);
+        return 0;
+    }
+#ifdef CONFIG_DARWIN
+    if (tty_clipboard == 2) {
+        FILE *fp;
+        qe_trace_bytes(qs, "pbcopy", -1, EB_TRACE_COMMAND);
+        fp = popen("pbcopy", "w");
+        if (fp == NULL) {
+            qe_trace_bytes(qs, "failed", -1, EB_TRACE_COMMAND);
+            qe_free(&contents);
+            return -1;
+        }
+        fwrite(contents, 1, size, fp);
+        pclose(fp);
+    }
+#endif
+    if (tty_clipboard == 1) {
+        size_t encoded_size;
+        char *encoded_contents = qe_encode64(contents, size, &encoded_size);
+        if (!encoded_contents) {
+            qe_free(&contents);
+            return -1;
+        }
+        qe_trace_bytes(qs, "tty-set-clipboard", -1, EB_TRACE_COMMAND);
+        TTY_FPRINTF(s->STDOUT, "\033]52;;%s\033\\", encoded_contents);
+        fflush(s->STDOUT);
+        qe_free(&encoded_contents);
+    }
+    qe_free(&ts->clipboard);
+    ts->clipboard = contents;
+    ts->clipboard_size = size;
+    return 0;
 }
 
 static int const csi_lookup[] = {
@@ -602,22 +936,33 @@ static int const csi_lookup[] = {
 static void tty_read_handler(void *opaque)
 {
     QEditScreen *s = opaque;
-    QEmacsState *qs = &qe_state;
+    QEmacsState *qs = s->qs;
     TTYState *ts = s->priv_data;
-    QEEvent ev1, *ev = &ev1;
+    QEEvent ev1, *ev = qe_event_clear(&ev1);
     u8 buf[1];
-    int ch, len, n1;
+    int ch, len, n1, n2, pending, shift;
 
     if (read(fileno(s->STDIN), buf, 1) != 1)
         return;
 
     if (qs->trace_buffer)
-        eb_trace_bytes(buf, 1, EB_TRACE_TTY);
+        qe_trace_bytes(qs, buf, 1, EB_TRACE_TTY);
 
+    shift = 0;
     ch = buf[0];
+    ts->last_ch = ts->this_ch;
+    ts->this_ch = ch;
     /* keep TTY bytes for error messages */
-    if (qs->input_len < countof(qs->input_buf))
-        qs->input_buf[qs->input_len++] = ch;
+    if (qs->input_len >= qs->input_size) {
+        qs->input_size += qs->input_size / 2 + 64;
+        if (qs->input_buf == qs->input_buf_def) {
+            qs->input_buf = qe_malloc_bytes(qs->input_size);
+            memcpy(qs->input_buf, qs->input_buf_def, qs->input_len);
+        } else {
+            qe_realloc_bytes(&qs->input_buf, qs->input_size);
+        }
+    }
+    qs->input_buf[qs->input_len++] = ch;
 
     switch (ts->input_state) {
     case IS_NORM:
@@ -645,210 +990,368 @@ static void tty_read_handler(void *opaque)
         if (ch == '\033') {
             if (!tty_dpy_is_user_input_pending(s)) {
                 /* Trick to distinguish the ESC key from function and meta
-                 * keys  transmitting escape sequences starting with \033
+                 * keys transmitting escape sequences starting with \033
                  * but followed immediately by more characters.
                  */
-                goto the_end;
+                goto the_end_meta;
             }
             ts->input_state = IS_ESC;
-        } else {
-            goto the_end;
+            if (qs->input_buf != qs->input_buf_def) {
+                qe_free(&qs->input_buf);
+                qs->input_buf = qs->input_buf_def;
+                qs->input_size = countof(qs->input_buf_def);
+                qs->input_buf[0] = ch;
+                qs->input_len = 1;
+            }
+            break;
         }
-        break;
+        if (ch == '\010') {
+            /* backspace */
+            if (ts->term_flags & KBS_CONTROL_H)
+                ch = KEY_DEL;
+        }
+        goto the_end_meta;
+
     case IS_ESC:
+        pending = tty_dpy_is_user_input_pending(s);
         if (ch == '\033') {
-            if (!tty_dpy_is_user_input_pending(s)) {
+            if (!pending) {
                 /* Distinguish alt-ESC from ESC prefix applied to other keys */
                 ch = KEY_META(KEY_ESC);
-                ts->input_state = IS_NORM;
                 goto the_end;
             }
             /* cygwin A-right transmit ESC ESC[C ... */
-            ts->has_meta = 8;
+            ts->has_meta = KEY_STATE_META;
             break;
         }
-        if (ch == '[') {
-            if (!tty_dpy_is_user_input_pending(s)) {
-                ch = KEY_META('[');
-                ts->input_state = IS_NORM;
-                goto the_end;
-            }
+        if (ch == '[' && pending) { // CSI
             ts->input_state = IS_CSI;
-            ts->input_param = 0;
-            ts->input_param2 = 0;
-        } else if (ch == 'O') {
-            ts->input_state = IS_ESC2;
-            ts->input_param = 0;
-            ts->input_param2 = 0;
-        } else {
-            ch = KEY_META(ch);
-            ts->input_state = IS_NORM;
-            goto the_end;
-        }
-        break;
-    case IS_CSI:
-        if (ch >= '0' && ch <= '9') {
-            ts->input_param = ts->input_param * 10 + ch - '0';
+            ts->nb_params = 0;
+            ts->params[0] = CSI_PARAM_OMITTED;
+            ts->params[1] = CSI_PARAM_OMITTED;
+            ts->params[2] = CSI_PARAM_OMITTED;
+            ts->leader = 0;
+            ts->interm = 0;
             break;
         }
-        ts->input_state = IS_NORM;
-        switch (ch) {
-        case ';': /* multi ignore but the last 2 */
-            /* iterm2 uses this for some keys:
-             * C-up, C-down, C-left, C-right, S-left, S-right,
+        if (ch == 'O' && pending) {
+            ts->input_state = IS_SS3;
+            ts->nb_params = 0;
+            ts->params[0] = 0;
+            ts->interm = 0;
+            break;
+        }
+        if (ch == ']' && pending) {
+            /* OSC terminal responses
+               eg: set palette entry: \033]4;0;rgb:0000/0000/0000\007
+                   set clipboard: \033]52;0;base64contents\033\\
              */
-            ts->input_param2 = ts->input_param;
-            ts->input_param = 0;
-            ts->input_state = IS_CSI;
+            ts->input_state = IS_OSC;
+            ts->has_meta = 0;
             break;
+        }
+        /* FIXME: handle terminal answers */
+        ch = KEY_META(ch);
+        goto the_end;
+
+    case IS_CSI:
+        /* CSI syntax is: CSI P ... P I ... I F
+         * P are parameter bytes (range 30 to 3F)
+         *   '<', '=', '>' and '?' parameter bytes usually only appear
+         *   first and are referred to as leader bytes. Note however that
+         *   requests may be issued for multiple arguments, each using a
+         *   '?' before the argument value.
+         * I are intermediary bytes (range 20 to 2F)
+         * F is the final byte (range 40..7E)
+         * we only support a single leader and intermediary byte.
+         */
+        if (ch >= 0x20 && ch <= 0x2F) {
+            /* intermediary byte: only keep the last one */
+            ts->interm = ch;
+            break;
+        }
+        if (ch >= 0x3C && ch <= 0x3F) {
+            /* leader byte: only keep the last one */
+            ts->leader = ch;
+            break;
+        }
+        if (ch >= '0' && ch <= '9') {
+            if (ts->interm) {
+                /* syntax error: ignore CSI sequence */
+                ts->input_state = IS_NORM;
+                ts->has_meta = 0;
+                break;
+            }
+            if (ts->nb_params < countof(ts->params)) {
+                ts->params[ts->nb_params] &= ~CSI_PARAM_OMITTED;
+                ts->params[ts->nb_params] *= 10;
+                ts->params[ts->nb_params] += ch - '0';
+            }
+            break;
+        }
+        ts->nb_params++;
+        if (ts->nb_params < countof(ts->params)) {
+            ts->params[ts->nb_params] = CSI_PARAM_OMITTED;
+        }
+        if (ch == ':' || ch == ';')
+            break;
+        /* FIXME: Should only accept final bytes in range 40..7E,
+         * and ignore other bytes.
+         */
+        n1 = ts->params[0] >= 0 ? ts->params[0] : 0;
+        n2 = ts->params[1] >= 0 ? ts->params[1] : 1;
+        switch ((ts->leader << 16) | (ts->interm << 8) | ch) {
         case '[':
+            /* cygwin/linux terminal: non standard sequence */
             ts->input_state = IS_CSI2;
             break;
         case '~':
-            /* If there is a second param, it tells the shift state,
-             * ex: S-f5 = ^[[15;2~ */
-            // XXX: should use extensible lookup table
-            n1 = ts->input_param;
-            if (ts->input_param2) {
-                // XXX: should handle shift function keys
-                ch = KEY_UNKNOWN;
-                ts->has_meta = 0;
-                goto the_end;
+            /* extended key:
+             * first argument is the key number
+             * second argument if present is the shift state + 1
+             * 1:shift, 2:alt, 4:control, 8:command/hyper
+             */
+            if (n2) n2 -= 1;
+            if (n1 == 27 && ts->nb_params >= 3 && ts->params[2] >= 0) {
+                /* xterm modifyOtherKeys extension */
+                ch = ts->params[2];
+                if (ch == 8 && (ts->term_flags |= KBS_CONTROL_H))
+                    ch = KEY_DEL;
+                // XXX: iTerm2 3.14.19 encoding bug for M-C-a to M-C-z
+                if (n2 == 4 && ch >= 'A' && ch <= 'Z') {
+                    n2 |= 2;
+                    ch += 'a' - 'A';
+                }
+                ch = get_modified_key(ch, n2);
+                goto the_end_meta;
             }
             if (n1 < countof(csi_lookup)) {
                 ch = csi_lookup[n1];
-                goto the_end;
-            }
-            break;
-            /* All these for ansi|cygwin */
-        default:
-            /* input_param contains the shift status:
-             * bit 2 is SHIFT
-             * bit 4 is CTRL
-             * bit 8 is ALT
-             */
-            if (ts->input_param & 8) {
-                ts->has_meta = 8;
-            }
-            if ((ts->input_param & 6) == 6) {
-                /* iterm2 CTRL-SHIFT-arrows */
-                switch (ch) {
-                case 'A': ch = KEY_CTRL_SHIFT_UP;        goto the_end;
-                case 'B': ch = KEY_CTRL_SHIFT_DOWN;      goto the_end;
-                case 'C': ch = KEY_CTRL_SHIFT_RIGHT;     goto the_end;
-                case 'D': ch = KEY_CTRL_SHIFT_LEFT;      goto the_end;
-                case 'F': ch = KEY_CTRL_SHIFT_END;       goto the_end;
-                case 'H': ch = KEY_CTRL_SHIFT_HOME;      goto the_end;
-                }
-            } else
-            if ((ts->input_param & 6) == 4) {
-                /* xterm CTRL-arrows */
-                /* iterm2 CTRL-arrows:
-                 * C-up    = ^[[1;5A
-                 * C-down  = ^[[1;5B
-                 * C-right = ^[[1;5C
-                 * C-left  = ^[[1;5D
-                 * C-end   = ^[[1;5F
-                 * C-home  = ^[[1;5H
-                 */
-                switch (ch) {
-                case 'A': ch = KEY_CTRL_UP;    goto the_end;
-                case 'B': ch = KEY_CTRL_DOWN;  goto the_end;
-                case 'C': ch = KEY_CTRL_RIGHT; goto the_end;
-                case 'D': ch = KEY_CTRL_LEFT;  goto the_end;
-                case 'F': ch = KEY_CTRL_END;   goto the_end;
-                case 'H': ch = KEY_CTRL_HOME;  goto the_end;
-                }
-            } else
-            if ((ts->input_param & 6) == 2) {
-                /* iterm2 SHIFT-arrows:
-                 * S-up    = ^[[1;2A
-                 * S-down  = ^[[1;2B
-                 * S-right = ^[[1;2C
-                 * S-left  = ^[[1;2D
-                 * S-f1 = ^[[1;2P
-                 * S-f2 = ^[[1;2Q
-                 * S-f3 = ^[[1;2R
-                 * S-f4 = ^[[1;2S
-                 * should set-mark if region not visible
-                 */
-                switch (ch) {
-                case 'A': ch = KEY_SHIFT_UP;    goto the_end;
-                case 'B': ch = KEY_SHIFT_DOWN;  goto the_end;
-                case 'C': ch = KEY_SHIFT_RIGHT; goto the_end;
-                case 'D': ch = KEY_SHIFT_LEFT;  goto the_end;
-                case 'F': ch = KEY_SHIFT_END;   goto the_end;
-                case 'H': ch = KEY_SHIFT_HOME;  goto the_end;
-                //case 'P': ch = KEY_SHIFT_F1;    goto the_end;
-                //case 'Q': ch = KEY_SHIFT_F2;    goto the_end;
-                //case 'R': ch = KEY_SHIFT_F3;    goto the_end;
-                //case 'S': ch = KEY_SHIFT_F4;    goto the_end;
-                }
-            } else {
-                switch (ch) {
-                case 'A': ch = KEY_UP;        goto the_end; // kcuu1
-                case 'B': ch = KEY_DOWN;      goto the_end; // kcud1
-                case 'C': ch = KEY_RIGHT;     goto the_end; // kcuf1
-                case 'D': ch = KEY_LEFT;      goto the_end; // kcub1
-                case 'F': ch = KEY_END;       goto the_end; // kend
-                //case 'G': ch = KEY_CENTER;  goto the_end; // kb2
-                case 'H': ch = KEY_HOME;      goto the_end; // khome
-                case 'L': ch = KEY_INSERT;    goto the_end; // kich1
-                //case 'M': ch = KEY_MOUSE;   goto the_end; // kmous
-                case 'Z': ch = KEY_SHIFT_TAB; goto the_end; // kcbt
-                }
+                goto the_end_modified;
             }
             ch = KEY_UNKNOWN;
+            goto the_end;
+        case 'u':
+            /* Paul "LeoNerd" Evans' CSI u protocol:
+             * see https://www.leonerd.org.uk/hacks/fixterms/
+             * supported by xterm if formatOtherKeys resource is selected
+             */
+            ch = get_modified_key(n1, n2 - 1);
+            goto the_end_meta;
+            /* All these for ansi|cygwin */
+        case ('<'<<16)|'M':
+        case ('<'<<16)|'m':
+            /* Mouse events */
+            ts->input_state = IS_NORM;
             ts->has_meta = 0;
+            if (ts->got_focus) {
+                /* Ignore mouse events until either:
+                   - down event is received after 100ms threshold
+                   - up event is received (and ignored)
+                 */
+                if (ch == 'M' && get_clock_ms() - ts->got_focus > 100) {
+                    ts->got_focus = 0;
+                } else {
+                    if (ch == 'm')
+                        ts->got_focus = 0;
+                    break;
+                }
+            }
+            if (ch == 'M')
+                ev->button_event.type = QE_BUTTON_PRESS_EVENT;
+            else
+                ev->button_event.type = QE_BUTTON_RELEASE_EVENT;
+            if (n1 & 32) {
+                /* button drag events (enabled by 1002) */
+                /* any motion events (enabled by 1003) */
+                ev->button_event.type = QE_MOTION_EVENT;
+                /* if n1 & 3 == 3 -> non button move */
+            }
+            ev->button_event.x = ts->params[1] - 1;
+            ev->button_event.y = ts->params[2] - 1;
+            ev->button_event.button = 0;
+            if (n1 & 4)
+                shift |= KEY_STATE_SHIFT;
+            if (n1 & 8)
+                shift |= KEY_STATE_META;
+            if (n1 & 16)
+                shift |= KEY_STATE_CONTROL;
+            ev->button_event.shift = shift;
+            switch (n1 & ~(4|8|16|32)) {
+            case 0:
+                ev->button_event.button = QE_BUTTON_LEFT;
+                break;
+            case 1:
+                ev->button_event.button = QE_BUTTON_MIDDLE;
+                break;
+            case 2:
+                ev->button_event.button = QE_BUTTON_RIGHT;
+                break;
+            case 3:
+                ev->button_event.button = QE_BUTTON_NONE;
+                break;
+            case 64:
+                ev->button_event.button = QE_WHEEL_UP;
+                break;
+            case 65:
+                ev->button_event.button = QE_WHEEL_DOWN;
+                break;
+            default:
+                break;
+            }
+            qe_handle_event(qs, ev);
+            break;
+        case 'I': // FocusIn  enabled by CSI ? 1004 h
+            ts->input_state = IS_NORM;
+            ts->has_meta = 0;
+            ts->got_focus = get_clock_ms();
+            qe_trace_bytes(qs, "tty-focus-in", -1, EB_TRACE_COMMAND);
+            if (tty_clipboard > 0) {
+                /* request clipboard contents into kill buffer if changed */
+                tty_request_clipboard(s);
+            }
+            break;
+        case 'O': // FocusOut
+            ts->input_state = IS_NORM;
+            ts->has_meta = 0;
+            qe_trace_bytes(qs, "tty-focus-out", -1, EB_TRACE_COMMAND);
+            if (tty_clipboard > 0) {
+                /* push last kill to clipboard if new */
+                tty_set_clipboard(s);
+            }
+            break;
+        default:
+            /* n2 contains the shift status + 1:
+             * bit 1 is SHIFT
+             * bit 2 is ALT
+             * bit 4 is CTRL
+             */
+            /* xterm CTRL-arrows
+             * iterm2 CTRL-arrows:
+             * C-up    = ^[[1;5A
+             * C-down  = ^[[1;5B
+             * C-right = ^[[1;5C
+             * C-left  = ^[[1;5D
+             * C-end   = ^[[1;5F
+             * C-home  = ^[[1;5H
+             */
+            /* iterm2 SHIFT-arrows:
+             * S-up    = ^[[1;2A
+             * S-down  = ^[[1;2B
+             * S-right = ^[[1;2C
+             * S-left  = ^[[1;2D
+             * S-f1 = ^[[1;2P
+             * S-f2 = ^[[1;2Q
+             * S-f3 = ^[[1;2R
+             * S-f4 = ^[[1;2S
+             */
+            if (n2) n2 -= 1;
+            switch (ch) {
+            case 'A': ch = KEY_UP;        goto the_end_modified; // kcuu1
+            case 'B': ch = KEY_DOWN;      goto the_end_modified; // kcud1
+            case 'C': ch = KEY_RIGHT;     goto the_end_modified; // kcuf1
+            case 'D': ch = KEY_LEFT;      goto the_end_modified; // kcub1
+            case 'F': ch = KEY_END;       goto the_end_modified; // kend
+            //case 'G': ch = KEY_CENTER;  goto the_end_modified; // kb2
+            case 'H': ch = KEY_HOME;      goto the_end_modified; // khome
+            case 'L': ch = KEY_INSERT;    goto the_end_modified; // kich1
+            case 'P': ch = KEY_F1;        goto the_end_modified;
+            case 'Q': ch = KEY_F2;        goto the_end_modified;
+            case 'R': ch = KEY_F3;        goto the_end_modified;
+            case 'S': ch = KEY_F4;        goto the_end_modified;
+            case 'Z': ch = KEY_SHIFT_TAB; goto the_end_modified; // kcbt
+            }
+            ch = KEY_UNKNOWN;
             goto the_end;
         }
         break;
     case IS_CSI2:
         /* cygwin/linux terminal */
-        ts->input_state = IS_NORM;
         switch (ch) {
-        case 'A': ch = KEY_F1; goto the_end;
-        case 'B': ch = KEY_F2; goto the_end;
-        case 'C': ch = KEY_F3; goto the_end;
-        case 'D': ch = KEY_F4; goto the_end;
-        case 'E': ch = KEY_F5; goto the_end;
+        case 'A': ch = KEY_F1; goto the_end_meta;
+        case 'B': ch = KEY_F2; goto the_end_meta;
+        case 'C': ch = KEY_F3; goto the_end_meta;
+        case 'D': ch = KEY_F4; goto the_end_meta;
+        case 'E': ch = KEY_F5; goto the_end_meta;
         }
         ch = KEY_UNKNOWN;
         goto the_end;
 
-    case IS_ESC2:       // "\EO"
+    case IS_SS3:       // "\EO"
         /* xterm/vt100 fn */
-        ts->input_state = IS_NORM;
-        switch (ch) {
-        case 'A': ch = KEY_UP;         goto the_end;
-        case 'B': ch = KEY_DOWN;       goto the_end;
-        case 'C': ch = KEY_RIGHT;      goto the_end;
-        case 'D': ch = KEY_LEFT;       goto the_end;
-        case 'F': ch = KEY_END;        goto the_end; /* iterm2 F-right */
-        case 'H': ch = KEY_HOME;       goto the_end; /* iterm2 F-left */
-        case 'P': ch = KEY_F1;         goto the_end;
-        case 'Q': ch = KEY_F2;         goto the_end;
-        case 'R': ch = KEY_F3;         goto the_end;
-        case 'S': ch = KEY_F4;         goto the_end;
-        case 't': ch = KEY_F5;         goto the_end;
-        case 'u': ch = KEY_F6;         goto the_end;
-        case 'v': ch = KEY_F7;         goto the_end;
-        case 'l': ch = KEY_F8;         goto the_end;
-        case 'w': ch = KEY_F9;         goto the_end;
-        case 'x': ch = KEY_F10;        goto the_end;
+        if (ch >= '0' && ch <= '9') {
+            ts->params[0] *= 10;
+            ts->params[0] += ch - '0';
+            break;
         }
-        ch = KEY_UNKNOWN;
-        goto the_end;
-
-    the_end:
-        if (ts->has_meta) {
-            ts->has_meta = 0;
+        n2 = ts->params[0] > 0 ? ts->params[0] - 1 : 0;
+        switch (ch) {
+        case 'A': ch = KEY_UP;         goto the_end_modified;
+        case 'B': ch = KEY_DOWN;       goto the_end_modified;
+        case 'C': ch = KEY_RIGHT;      goto the_end_modified;
+        case 'D': ch = KEY_LEFT;       goto the_end_modified;
+        case 'F': ch = KEY_END;        goto the_end_modified; /* iterm2 F-right */
+        case 'H': ch = KEY_HOME;       goto the_end_modified; /* iterm2 F-left */
+        case 'M': ch = KEY_RET;        goto the_end_modified; /* Enter on keypad */
+        case 'P': ch = KEY_F1;         goto the_end_modified;
+        case 'Q': ch = KEY_F2;         goto the_end_modified;
+        case 'R': ch = KEY_F3;         goto the_end_modified;
+        case 'S': ch = KEY_F4;         goto the_end_modified;
+        case 't': ch = KEY_F5;         goto the_end_modified;
+        case 'u': ch = KEY_F6;         goto the_end_modified;
+        case 'v': ch = KEY_F7;         goto the_end_modified;
+        case 'l': ch = KEY_F8;         goto the_end_modified;
+        case 'w': ch = KEY_F9;         goto the_end_modified;
+        case 'x': ch = KEY_F10;        goto the_end_modified;
+        default:  ch = KEY_UNKNOWN;    goto the_end;
+        }
+    the_end_modified:
+        /* modify the special key */
+        if (n2 & 1) {
+            shift |= KEY_STATE_SHIFT;
+            ch = KEY_SHIFT(ch);
+        }
+        if (n2 & (2 | 8)) {
+            shift |= KEY_STATE_META;
             ch = KEY_META(ch);
         }
-        // XXX: should add custom key conversions, especially for KEY_UNKNOWN
+        if (n2 & 4) {
+            shift |= KEY_STATE_CONTROL;
+            ch = KEY_CONTROL(ch);
+        }
+
+    the_end_meta:
+        if (ts->has_meta)
+            ch = KEY_META(ch);
+
+    the_end:
+        ts->input_state = IS_NORM;
+        ts->has_meta = 0;
+        // XXX: should add custom key sequences, especially for KEY_UNKNOWN
         ev->key_event.type = QE_KEY_EVENT;
+        ev->key_event.shift = shift;
         ev->key_event.key = ch;
-        qe_handle_event(ev);
+        qe_handle_event(qs, ev);
+        break;
+
+    case IS_OSC:
+        /* OSC syntax is: OSC string 07 or OSC string ST (ESC \) */
+        /* stop reading messge on BEL, ST and ESC \ */
+        if (!(ch == 7 || ch == 0x9C || (ch == '\\' && ts->last_ch == 27)))
+            break;
+        ts->input_state = IS_NORM;
+        ts->has_meta = 0;
+        n1 = strtol(cs8(qs->input_buf) + 2, NULL, 10);
+        if (qs->trace_buffer) {
+            char buf1[32];
+            snprintf(buf1, sizeof buf1, "tty-osc-%d", n1);
+            qe_trace_bytes(qs, buf1, -1, EB_TRACE_COMMAND);
+        }
+        if (n1 == 52) {
+            if (tty_clipboard > 0) {
+                tty_get_clipboard(s, ch);
+            }
+        }
         break;
     }
 }
@@ -1010,35 +1513,9 @@ static void comb_cache_clean(TTYState *ts, const TTYChar *screen, int len) {
     }
 }
 
-static void comb_cache_describe(QEditScreen *s, EditBuffer *b) {
-    TTYState *ts = s->priv_data;
+static void comb_cache_describe(QEditScreen *s, EditBuffer *b, TTYState *ts) {
     char32_t *ip;
     unsigned int i;
-    int w = 16;
-
-    eb_printf(b, "Device Description\n\n");
-
-    eb_printf(b, "%*s: %s\n", w, "term_name", ts->term_name);
-    eb_printf(b, "%*s: %d  %s\n", w, "term_code", ts->term_code,
-              ts->term_code == TERM_UNKNOWN ? "UNKNOWN" :
-              ts->term_code == TERM_ANSI ? "ANSI" :
-              ts->term_code == TERM_VT100 ? "VT100" :
-              ts->term_code == TERM_XTERM ? "XTERM" :
-              ts->term_code == TERM_LINUX ? "LINUX" :
-              ts->term_code == TERM_CYGWIN ? "CYGWIN" :
-              ts->term_code == TERM_TW100 ? "TW100" :
-              "");
-    eb_printf(b, "%*s: %#x %s%s%s%s%s%s\n", w, "term_flags", ts->term_flags,
-              ts->term_flags & KBS_CONTROL_H ? " KBS_CONTROL_H" : "",
-              ts->term_flags & USE_ERASE_END_OF_LINE ? " USE_ERASE_END_OF_LINE" : "",
-              ts->term_flags & USE_BOLD_AS_BRIGHT_FG ? " USE_BOLD_AS_BRIGHT_FG" : "",
-              ts->term_flags & USE_BLINK_AS_BRIGHT_BG ? " USE_BLINK_AS_BRIGHT_BG" : "",
-              ts->term_flags & USE_256_COLORS ? " USE_256_COLORS" : "",
-              ts->term_flags & USE_TRUE_COLORS ? " USE_TRUE_COLORS" : "");
-    eb_printf(b, "%*s: fg:%d, bg:%d\n", w, "terminal colors",
-              ts->term_fg_colors_count, ts->term_bg_colors_count);
-    eb_printf(b, "%*s: fg:%d, bg:%d\n", w, "virtual tty colors",
-              ts->tty_fg_colors_count, ts->tty_bg_colors_count);
 
     eb_printf(b, "\nUnicode combination cache:\n\n");
 
@@ -1059,7 +1536,7 @@ static void comb_cache_describe(QEditScreen *s, EditBuffer *b) {
 #else
 #define comb_cache_add(s, p, n)  TTY_CHAR_BAD
 #define comb_cache_clean(s, p, n)
-#define comb_cache_describe(s, b)
+#define comb_cache_describe(s, b, ts)
 #endif
 
 static void tty_dpy_draw_text(QEditScreen *s, QEFont *font,
@@ -1684,7 +2161,37 @@ static int tty_dpy_draw_picture(QEditScreen *s,
 
 static void tty_dpy_describe(QEditScreen *s, EditBuffer *b)
 {
-    comb_cache_describe(s, b);
+    TTYState *ts = s->priv_data;
+    int w = 16;
+
+    eb_printf(b, "Device Description\n\n");
+
+    if (ts->term_name)
+        eb_printf(b, "%*s: %s\n", w, "term_name", ts->term_name);
+    eb_printf(b, "%*s: %d  %s\n", w, "term_code", ts->term_code,
+              term_code_name[ts->term_code]);
+    eb_printf(b, "%*s: %d\n", w, "tty_mk", tty_mk);
+    eb_printf(b, "%*s: %d\n", w, "tty_mouse", tty_mouse);
+    eb_printf(b, "%*s: %d\n", w, "tty_clipboard", tty_clipboard);
+    eb_printf(b, "%*s: %#x %s%s%s%s%s%s\n", w, "term_flags", ts->term_flags,
+              ts->term_flags & KBS_CONTROL_H ? " KBS_CONTROL_H" : "",
+              ts->term_flags & USE_ERASE_END_OF_LINE ? " USE_ERASE_END_OF_LINE" : "",
+              ts->term_flags & USE_BOLD_AS_BRIGHT_FG ? " USE_BOLD_AS_BRIGHT_FG" : "",
+              ts->term_flags & USE_BLINK_AS_BRIGHT_BG ? " USE_BLINK_AS_BRIGHT_BG" : "",
+              ts->term_flags & USE_256_COLORS ? " USE_256_COLORS" : "",
+              ts->term_flags & USE_TRUE_COLORS ? " USE_TRUE_COLORS" : "");
+    eb_printf(b, "%*s: fg:%d, bg:%d\n", w, "terminal colors",
+              ts->term_fg_colors_count, ts->term_bg_colors_count);
+    eb_printf(b, "%*s: fg:%d, bg:%d\n", w, "virtual tty colors",
+              ts->tty_fg_colors_count, ts->tty_bg_colors_count);
+
+    comb_cache_describe(s, b, ts);
+}
+
+static void tty_dpy_sound_bell(QEditScreen *s)
+{
+    fputc('\007', s->STDOUT);
+    fflush(s->STDOUT);
 }
 
 static QEDisplay tty_dpy = {
@@ -1713,12 +2220,15 @@ static QEDisplay tty_dpy = {
     tty_dpy_draw_picture,
     NULL, /* dpy_full_screen */
     tty_dpy_describe,
+    tty_dpy_sound_bell,
+    tty_dpy_suspend,
+    qe_dpy_error,
     NULL, /* next */
 };
 
-static int tty_init(void)
+static int tty_init(QEmacsState *qs)
 {
-    return qe_register_display(&tty_dpy);
+    return qe_register_display(qs, &tty_dpy);
 }
 
 qe_module_init(tty_init);

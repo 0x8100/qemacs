@@ -59,17 +59,15 @@ enum {
 };
 
 static void icon_colorize_line(QEColorizeContext *cp,
-                               char32_t *str, int n, ModeDef *syn)
+                               const char32_t *str, int n,
+                               QETermStyle *sbuf, ModeDef *syn)
 {
     int i, start, indent, state, style, klen;
     char32_t c, delim;
     char kbuf[64];
 
-    for (i = 0; qe_isblank(str[i]); i++)
-        continue;
-
+    i = cp_skip_blanks(str, 0, n);
     state = cp->colorize_state;
-
     indent = i;
     start = i;
     c = 0;
@@ -183,13 +181,13 @@ static void icon_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
  the_end:
     /* set style on eol char */
-    SET_COLOR1(str, n, style);
+    SET_STYLE1(sbuf, n, style);
 
     cp->colorize_state = state;
 }
@@ -207,10 +205,9 @@ static ModeDef icon_mode = {
     .fallback = &c_mode,
 };
 
-static int icon_init(void)
+static int icon_init(QEmacsState *qs)
 {
-    qe_register_mode(&icon_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &icon_mode, MODEF_SYNTAX);
     return 0;
 }
 

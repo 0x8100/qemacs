@@ -1,7 +1,7 @@
 /*
  * QEmacs, extra commands non full version
  *
- * Copyright (c) 2000-2024 Charlie Gordon.
+ * Copyright (c) 2000-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,35 +22,139 @@
  * THE SOFTWARE.
  */
 
-#include <time.h>
-
 #include "qe.h"
 #include "variables.h"
 
+typedef struct Equivalent {
+    struct Equivalent *next;
+    char *str1;
+    char *str2;
+    int prefix_len;
+} Equivalent;
+
+Equivalent *create_equivalent(const char *str1, const char *str2) {
+    Equivalent *ep;
+
+    ep = qe_mallocz(Equivalent);
+    ep->str1 = qe_strdup(str1);
+    ep->str2 = qe_strdup(str2);
+    ep->prefix_len = utf8_prefix_len(str1, str2);
+    ep->next = NULL;
+    return ep;
+}
+
+void delete_equivalent(Equivalent *ep) {
+    qe_free(ep->str1);
+    qe_free(ep->str2);
+    qe_free(ep);
+}
+
+static void do_define_equivalent(EditState *s, const char *str1, const char *str2)
+{
+    QEmacsState *qs = s->qs;
+    Equivalent **epp;
+
+    /* append the definition, ignore duplicates */
+    for (epp = &qs->first_equivalent; *epp; epp = &(*epp)->next) {
+        Equivalent *ep = *epp;
+        if (!strcmp(ep->str1, str1) && !strcmp(ep->str2, str2))
+            return;
+    }
+    *epp = create_equivalent(str1, str2);
+}
+
+static void do_delete_equivalent(EditState *s, const char *str)
+{
+    QEmacsState *qs = s->qs;
+    Equivalent **epp;
+
+    for (epp = &qs->first_equivalent; *epp; epp = &(*epp)->next) {
+        Equivalent *ep = *epp;
+        if (!strcmp(ep->str1, str) || !strcmp(ep->str2, str)) {
+            *epp = ep->next;
+            delete_equivalent(ep);
+        }
+    }
+}
+
+static void do_list_equivalents(EditState *s, int argval)
+{
+    QEmacsState *qs = s->qs;
+    EditBuffer *b;
+    Equivalent *ep;
+
+    b = new_help_buffer(s);
+    if (!b)
+        return;
+
+    for (ep = qs->first_equivalent; ep; ep = ep->next) {
+        eb_printf(b, "  \"%s\" <-> \"%s\"\n", ep->str1, ep->str2);
+    }
+
+    show_popup(s, b, "Equivalents");
+}
+
+static void qe_free_equivalents(QEmacsState *qs) {
+    while (qs->first_equivalent) {
+        Equivalent *ep = qs->first_equivalent;
+        qs->first_equivalent = ep->next;
+        delete_equivalent(ep);
+    }
+}
+
+static int qe_skip_equivalent(EditState *s,
+                              EditBuffer *b1, int offset1, int *offset1p,
+                              EditBuffer *b2, int offset2, int *offset2p)
+{
+    QEmacsState *qs = s->qs;
+    Equivalent *ep;
+    int end1, end2;
+
+    for (ep = qs->first_equivalent; ep; ep = ep->next) {
+        int pos = ep->prefix_len;
+        if (pos > 0) {
+            if (!(eb_match_str_utf8_reverse(b1, offset1, ep->str1, pos, NULL)
+              &&  eb_match_str_utf8_reverse(b2, offset2, ep->str2, pos, NULL))
+            &&  !(eb_match_str_utf8_reverse(b1, offset1, ep->str2, pos, NULL)
+              &&  eb_match_str_utf8_reverse(b2, offset2, ep->str1, pos, NULL)))
+                continue;
+        }
+        if ((eb_match_str_utf8(b1, offset1, ep->str1 + pos, &end1)
+         &&  eb_match_str_utf8(b2, offset2, ep->str2 + pos, &end2))
+        ||  (eb_match_str_utf8(b1, offset1, ep->str2 + pos, &end1)
+         &&  eb_match_str_utf8(b2, offset2, ep->str1 + pos, &end2))) {
+            *offset1p = end1;
+            *offset2p = end2;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int qe_skip_style(EditState *s, int offset, int *offsetp, QETermStyle style)
 {
-    char32_t buf[COLORED_MAX_LINE_SIZE];
-    QETermStyle sbuf[COLORED_MAX_LINE_SIZE];
+    QEColorizeContext cp[1];
     int line_num, col_num, len, pos;
     int offset0, offset1;
 
-    if (!s->colorize_func && !s->b->b_styles)
+    if (!s->colorize_mode && !s->b->b_styles)
         return 0;
 
+    cp_initialize(cp, s);
     eb_get_pos(s->b, &line_num, &col_num, offset);
     offset0 = eb_goto_bol2(s->b, offset, &pos);
-    len = get_colorized_line(s, buf, countof(buf), sbuf,
-                             offset0, &offset1, line_num);
-    if (len > countof(buf))
-        len = countof(buf);
-    if (pos >= len)
+    len = get_colorized_line(cp, offset0, &offset1, line_num);
+    if (len > cp->buf_size)
+        len = cp->buf_size;
+    if (pos >= len ||cp->sbuf[pos] != style) {
+        cp_destroy(cp);
         return 0;
-    if (sbuf[pos] != style)
-        return 0;
-    while (pos < len && sbuf[pos] == style) {
+    }
+    while (pos < len && cp->sbuf[pos] == style) {
         offset = eb_next(s->b, offset);
         pos++;
     }
+    cp_destroy(cp);
     *offsetp = offset;
     return 1;
 }
@@ -123,7 +227,7 @@ static char *utf8_char32_to_string(char *buf, char32_t c) {
 
 void do_compare_windows(EditState *s, int argval)
 {
-    QEmacsState *qs = s->qe_state;
+    QEmacsState *qs = s->qs;
     EditState *s1;
     EditState *s2;
     int offset1, offset2, size1, size2;
@@ -153,6 +257,7 @@ void do_compare_windows(EditState *s, int argval)
         qs->ignore_comments = 0;
         qs->ignore_case = 0;
         qs->ignore_preproc = 0;
+        qs->ignore_equivalent = 0;
     }
     if (argval & 4)
         qs->ignore_spaces ^= 1;
@@ -162,6 +267,8 @@ void do_compare_windows(EditState *s, int argval)
         qs->ignore_case ^= 1;
     if (argval & 256)
         qs->ignore_preproc ^= 1;
+    if (argval & 1024)
+        qs->ignore_equivalent ^= 1;
 
     size1 = s1->b->total_size;
     size2 = s2->b->total_size;
@@ -208,6 +315,14 @@ void do_compare_windows(EditState *s, int argval)
                         continue;
                     }
                 }
+            }
+        }
+        if (qs->ignore_equivalent) {
+            if (qe_skip_equivalent(s1, s1->b, s1->offset, &s1->offset,
+                                   s2->b, s2->offset, &s2->offset))
+            {
+                comment1 = "Skipped equivalent strings, ";
+                continue;
             }
         }
         if (qs->ignore_spaces) {
@@ -273,11 +388,11 @@ void do_compare_files(EditState *s, const char *filename, int bflags)
         snprintf(buf, sizeof(buf), "../%s", filename);
     } else
     if (pathlen == 1) {
-        put_status(s, "Reference file is in root directory: %s", filename);
+        put_error(s, "Reference file is in root directory: %s", filename);
         return;
     } else
     if (pathlen >= MAX_FILENAME_SIZE) {
-        put_status(s, "Filename too long: %s", filename);
+        put_error(s, "Filename too long: %s", filename);
         return;
     } else {
         pstrcpy(buf, sizeof(buf), filename);
@@ -288,13 +403,11 @@ void do_compare_files(EditState *s, const char *filename, int bflags)
 
     // XXX: should check for regular file
     if (access(filename, R_OK)) {
-        put_status(s, "Cannot access file %s: %s",
-                   filename, strerror(errno));
+        put_error(s, "Cannot access file %s: %s", filename, strerror(errno));
         return;
     }
     if (access(buf, R_OK)) {
-        put_status(s, "Cannot access file %s: %s",
-                   buf, strerror(errno));
+        put_error(s, "Cannot access file %s: %s", buf, strerror(errno));
         return;
     }
 
@@ -302,26 +415,149 @@ void do_compare_files(EditState *s, const char *filename, int bflags)
     do_delete_other_windows(s, 0);
     e = qe_split_window(s, SW_STACKED, 50);
     if (e) {
-        s->qe_state->active_window = e;
+        s->qs->active_window = e;
         do_find_file(e, buf, bflags);
     }
 }
 
-void do_delete_horizontal_space(EditState *s)
+#define QE_AW_ENLARGE     0
+#define QE_AW_SHRINK      1
+#define QE_AW_VERTICAL    0
+#define QE_AW_HORIZONTAL  2
+
+static void do_adjust_window(EditState *s, int argval, int flags)
 {
-    int from, to, offset;
+    QEmacsState *qs = s->qs;
+    EditState *e;
+    int delta, x = -1, y = -1;
 
-    /* boundary check unnecessary because eb_prevc returns '\n'
-     * at bof and eof and qe_isblank return true only on SPC and TAB.
-     */
-    from = to = s->offset;
-    while (qe_isblank(eb_prevc(s->b, from, &offset)))
-        from = offset;
+    if (s->flags & WF_MINIBUF)
+        return;
+    if (argval < 0) {
+        flags ^= QE_AW_SHRINK;
+        argval = -argval;
+    }
+    if (flags & QE_AW_SHRINK)
+        argval = -argval;
 
-    while (qe_isblank(eb_nextc(s->b, to, &offset)))
-        to = offset;
+    if (!qs->first_transient_key) {
+        put_status(s, "Adjusting window, repeat with ^, }, {, v");
+        qe_register_transient_binding(qs, "enlarge-window", "^, up");
+        qe_register_transient_binding(qs, "shrink-window", "v, down");
+        qe_register_transient_binding(qs, "enlarge-window-horizontally", "}, right");
+        qe_register_transient_binding(qs, "shrink-window-horizontally", "{, left");
+    }
 
-    eb_delete_range(s->b, from, to);
+    if (flags & QE_AW_HORIZONTAL) {
+        delta = s->char_width * argval;
+        if ((delta > 0 && s->x1 > delta)
+        ||  (delta < 0 && s->x1 > 0 && s->x2 - s->x1 > -delta)) {
+            x = s->x1;  /* adjust s->x1 */
+            delta = -delta;
+        } else
+        if ((delta > 0 && s->x2 + delta < qs->width)
+        ||  (delta < 0 && s->x2 < qs->width && s->x2 - s->x1 > -delta)) {
+            x = s->x2;  /* adjust s->x2 */
+        } else {
+            return;
+        }
+    } else {
+        delta = s->line_height * argval;
+        if ((delta > 0 && s->y1 > delta)
+        ||  (delta < 0 && s->y1 > 0 && s->y2 - s->y1 > -delta)) {
+            y = s->y1;  /* adjust s->y1 */
+            delta = -delta;
+        } else
+        if ((delta > 0 && s->y2 + delta < qs->height - qs->status_height)
+        ||  (delta < 0 && s->y2 < qs->height - qs->status_height && s->y2 - s->y1 > -delta)) {
+            y = s->y2;  /* adjust s->y2 */
+        } else {
+            return;
+        }
+    }
+    for (e = qs->first_window; e != NULL; e = e->next_window) {
+        if (s == e || !(e->flags & (WF_POPUP | WF_MINIBUF))) {
+            if (e->x1 == x)
+                e->x1 += delta;
+            if (e->x2 == x)
+                e->x2 += delta;
+            if (e->y1 == y)
+                e->y1 += delta;
+            if (e->y2 == y)
+                e->y2 += delta;
+        }
+    }
+    qs->complete_refresh = 1;
+    do_refresh(s);
+}
+
+static void do_resize_window(EditState *s) {
+    /* prevent resizing minibuffer */
+    if (s->flags & WF_MINIBUF)
+        return;
+
+    put_status(s, "Resize window interactively with {left}, {right}, {up}, {down}");
+    do_adjust_window(s, 0, 0);
+}
+
+enum {
+    DH_POINT = 0,   /* delete blanks around point */
+    DH_BOL = 1,     /* delete blanks at beginning of line */
+    DH_EOL = 2,     /* delete blanks at end of line */
+    DH_FULL = 3,    /* delete blanks at end of line on the full buffer */
+};
+
+void do_delete_horizontal_space(EditState *s, int mode)
+{
+    int from, to, stop, offset;
+    EditBuffer *b = s->b;
+
+    stop = from = s->offset;
+    if (s->region_style) {
+        if (mode == DH_FULL)
+            mode = DH_EOL;
+        from = min_int(b->mark, s->offset);
+        stop = max_int(b->mark, s->offset);
+        s->region_style = 0;
+    } else
+    if (mode == DH_FULL) {
+        from = 0;
+        stop = b->total_size;
+    }
+
+    if (mode == DH_BOL)
+        from = eb_goto_bol(b, from);
+
+    for (;;) {
+        if (mode & DH_EOL)
+            from = eb_goto_eol(b, from);
+
+        to = from;
+        while (qe_isblank(eb_prevc(b, from, &offset)))
+            from = offset;
+
+        while (qe_isblank(eb_nextc(b, to, &offset)))
+            to = offset;
+
+        if (stop < to)
+            stop = to;
+        stop -= eb_delete_range(b, from, to);
+        from = eb_next_line(b, from);
+        if (from >= stop)
+            break;
+    }
+    if (mode == DH_FULL) {
+        /* delete trailing newlines */
+        // XXX: make this a separate function
+        to = b->total_size;
+        if (to > 0 && eb_prevc(b, to, &to) == '\n') {
+            from = to;
+            while (from > 0 && eb_prevc(b, from, &offset) == '\n')
+                from = offset;
+            if (from < to)
+                eb_delete_range(b, from, to);
+        }
+    }
 }
 
 static void do_delete_blank_lines(EditState *s) {
@@ -500,37 +736,64 @@ static void do_untabify_region(EditState *s)
     eb_untabify(s->b, s->b->mark, s->offset);
 }
 #endif
-static void do_indent_region(EditState *s, int start, int end)
+
+/*---------------- indentation ----------------*/
+
+static void do_indent_rigidly(EditState *s, int start, int end, int argval)
 {
-    int col_num, line1, line2;
+    if (argval == NO_ARG) {
+        /* enter interactive mode */
+        QEmacsState *qs = s->qs;
+        if (!qs->first_transient_key) {
+            s->region_style = QE_STYLE_REGION_HILITE;
+            put_status(s, "Indent the region interactively with TAB, left, right, S-left, S-right");
+            qe_register_transient_binding(qs, "indent-rigidly-left", "left");
+            qe_register_transient_binding(qs, "indent-rigidly-right", "right");
+            qe_register_transient_binding(qs, "indent-rigidly-left-to-tab-stop", "S-left, S-TAB");
+            qe_register_transient_binding(qs, "indent-rigidly-right-to-tab-stop", "S-right, TAB");
+        }
+    } else {
+        do_indent_rigidly_by(s, start, end, argval);
+    }
+}
+
+static void do_indent_region(EditState *s, int start, int end, int argval)
+{
+    int col_num, line, line1, line2;
 
     /* deactivate region hilite */
     s->region_style = 0;
 
+    if (argval < 0 || !s->mode->indent_func
+    ||  s->qs->last_cmd_func == (CmdFunc)do_indent_region) {
+        do_indent_rigidly_to_tab_stop(s, start, end, argval);
+        return;
+    }
+
     /* Swap point and mark so mark <= point */
     if (end < start) {
         int tmp = start;
-        end = start;
-        start = tmp;
+        start = end;
+        end = tmp;
     }
     /* We do it with lines to avoid offset variations during indenting */
     eb_get_pos(s->b, &line1, &col_num, start);
-    eb_get_pos(s->b, &line2, &col_num, end);
-
-    if (col_num == 0)
-        line2--;
-
-    /* Iterate over all lines inside block */
-    s->b->mark = eb_goto_bol(s->b, start);
-    for (; line1 <= line2; line1++) {
-        if (s->mode->indent_func) {
-            (s->mode->indent_func)(s, eb_goto_pos(s->b, line1, 0));
-        } else {
-            s->offset = eb_goto_pos(s->b, line1, 0);
-            do_tab(s, 1);
-        }
+    if (start == end) {
+        line2 = line1;
+    } else {
+        if (col_num > 0)
+            line1++;
+        eb_get_pos(s->b, &line2, &col_num, end);
+        if (col_num == 0)
+            line2--;
     }
-    s->offset = eb_goto_eol(s->b, s->offset);
+    /* Iterate over all lines inside block */
+    for (line = line1; line <= line2; line++) {
+        int offset = eb_goto_pos(s->b, line, 0);
+        int off1;
+        if (eb_nextc(s->b, offset, &off1) != '\n')
+            (s->mode->indent_func)(s, offset);
+    }
 }
 
 void do_show_date_and_time(EditState *s, int argval)
@@ -560,8 +823,7 @@ static char32_t matching_delimiter(char32_t c) {
 
 static void forward_block(EditState *s, int dir)
 {
-    char32_t buf[COLORED_MAX_LINE_SIZE];
-    QETermStyle sbuf[COLORED_MAX_LINE_SIZE];
+    QEColorizeContext cp[1];
     char32_t balance[MAX_LEVEL];
     int use_colors;
     int line_num, col_num, style, style0, level;
@@ -572,22 +834,23 @@ static void forward_block(EditState *s, int dir)
     int offset1;  /* offset of the beginning of the next line */
     char32_t c;
 
+    cp_initialize(cp, s);
+
     offset = s->offset;
     eb_get_pos(s->b, &line_num, &col_num, offset);
     offset1 = offset0 = eb_goto_bol2(s->b, offset, &pos);
-    use_colors = s->colorize_func || s->b->b_styles;
+    use_colors = s->colorize_mode || s->b->b_styles;
     style0 = 0;
     len = 0;
     if (use_colors) {
-        len = get_colorized_line(s, buf, countof(buf), sbuf,
-                                 offset1, &offset1, line_num);
-        if (len < countof(buf) - 2) {
+        len = get_colorized_line(cp, offset1, &offset1, line_num);
+        if (len < cp->buf_size - 2) {
             if (pos > 0
-            &&  ((c = buf[pos - 1]) == ']' || c == '}' || c == ')')) {
-                style0 = sbuf[pos - 1];
+            &&  ((c = cp->buf[pos - 1]) == ']' || c == '}' || c == ')')) {
+                style0 = cp->sbuf[pos - 1];
             } else
             if (pos < len) {
-                style0 = sbuf[pos];
+                style0 = cp->sbuf[pos];
             }
         } else {
             /* very long line detected, use fallback version */
@@ -607,9 +870,8 @@ static void forward_block(EditState *s, int dir)
                 offset1 = offset0 = eb_goto_bol2(s->b, offset, &pos);
                 len = 0;
                 if (use_colors) {
-                    len = get_colorized_line(s, buf, countof(buf), sbuf,
-                                             offset1, &offset1, line_num);
-                    if (len >= countof(buf) - 2) {
+                    len = get_colorized_line(cp, offset1, &offset1, line_num);
+                    if (len >= cp->buf_size - 2) {
                         /* very long line detected, use fallback version */
                         use_colors = 0;
                         len = 0;
@@ -621,7 +883,7 @@ static void forward_block(EditState *s, int dir)
             style = 0;
             --pos;
             if (pos >= 0 && pos < len) {
-                style = sbuf[pos];
+                style = cp->sbuf[pos];
             }
             if (style != style0 && style != QE_STYLE_KEYWORD && style != QE_STYLE_FUNCTION) {
                 if (style0 == 0)
@@ -660,13 +922,13 @@ static void forward_block(EditState *s, int dir)
                     --level;
                     if (level < MAX_LEVEL && balance[level] != c) {
                         /* XXX: should set mark and offset */
-                        put_status(s, "Unmatched delimiter %c <> %c",
-                                   c, balance[level]);
-                        return;
+                        put_error(s, "Unmatched delimiter %c <> %c",
+                                  c, balance[level]);
+                        goto done;
                     }
                     if (level == 0) {
                         s->offset = offset;
-                        return;
+                        goto done;
                     }
                 } else {
                     /* silently move up one level */
@@ -684,9 +946,8 @@ static void forward_block(EditState *s, int dir)
                 offset1 = offset0 = offset;
                 len = 0;
                 if (use_colors) {
-                    len = get_colorized_line(s, buf, countof(buf), sbuf,
-                                             offset1, &offset1, line_num);
-                    if (len >= countof(buf) - 2) {
+                    len = get_colorized_line(cp, offset1, &offset1, line_num);
+                    if (len >= cp->buf_size - 2) {
                         /* very long line detected, use fallback version */
                         use_colors = 0;
                         len = 0;
@@ -698,7 +959,7 @@ static void forward_block(EditState *s, int dir)
             }
             style = 0;
             if (pos < len) {
-                style = sbuf[pos];
+                style = cp->sbuf[pos];
             }
             pos++;
             if (style0 != style && style != QE_STYLE_KEYWORD && style != QE_STYLE_FUNCTION) {
@@ -745,13 +1006,13 @@ static void forward_block(EditState *s, int dir)
                     --level;
                     if (level < MAX_LEVEL && balance[level] != c) {
                         /* XXX: should set mark and offset */
-                        put_status(s, "Unmatched delimiter %c <> %c",
-                                   c, balance[level]);
-                        return;
+                        put_error(s, "Unmatched delimiter %c <> %c",
+                                  c, balance[level]);
+                        goto done;
                     }
                     if (level == 0) {
                         s->offset = offset;
-                        return;
+                        goto done;
                     }
                 } else {
                     /* silently move up one level */
@@ -762,10 +1023,12 @@ static void forward_block(EditState *s, int dir)
     }
     if (level != 0) {
         /* XXX: should set mark and offset */
-        put_status(s, "Unmatched delimiter");
+        put_error(s, "Unmatched delimiter");
     } else {
         s->offset = offset;
     }
+done:
+    cp_destroy(cp);
 }
 
 static void do_forward_block(EditState *s, int n)
@@ -789,13 +1052,16 @@ static void do_kill_block(EditState *s, int n)
 
 void do_transpose(EditState *s, int cmd)
 {
-    QEmacsState *qs = s->qe_state;
-    int offset0, offset1, offset2, offset3, end_offset;
+    QEmacsState *qs = s->qs;
+    int offset0, offset1, offset2, offset3;
+    int start_offset, end_offset;
     int size0, size1, size2;
     EditBuffer *b = s->b;
 
     if (check_read_only(s))
         return;
+
+    // FIXME: handle repeat count
 
     /* compute positions of ranges to swap:
        offset0..offset1 and offset2..offset3
@@ -854,6 +1120,35 @@ void do_transpose(EditState *s, int cmd)
             end_offset = offset3;
         }
         break;
+    case CMD_TRANSPOSE_PARAGRAPHS:
+        start_offset = s->offset;
+        if (!eb_is_blank_line(b, start_offset, NULL))
+            start_offset = eb_next_paragraph(b, start_offset);
+        offset2 = eb_skip_blank_lines(b, start_offset, 1);
+        offset3 = eb_next_paragraph(b, offset2);
+        offset1 = eb_skip_blank_lines(b, start_offset, -1);
+        offset0 = eb_prev_paragraph(b, offset1);
+        if (qs->emulation_flags == 1) {
+            /* set position to end of first paragraph */
+            end_offset = offset0 + offset3 - offset2;
+        } else {
+            /* set position past last paragraph (emacs behaviour) */
+            end_offset = offset3;
+        }
+        break;
+    case CMD_TRANSPOSE_SENTENCES:
+        offset0 = eb_prev_sentence(b, s->offset);
+        offset1 = eb_next_sentence(b, offset0);
+        offset3 = eb_next_sentence(b, offset1);
+        offset2 = eb_prev_sentence(b, offset3);
+        if (qs->emulation_flags == 1) {
+            /* set position to end of first paragraph */
+            end_offset = offset0 + offset3 - offset2;
+        } else {
+            /* set position past last paragraph (emacs behaviour) */
+            end_offset = offset3;
+        }
+        break;
     default:
         return;
     }
@@ -861,6 +1156,7 @@ void do_transpose(EditState *s, int cmd)
     size1 = offset2 - offset1;
     size2 = offset3 - offset2;
 
+    // XXX: should have a way to move buffer contents
     if (!b->b_styles && size0 + size1 + size2 <= 1024) {
         u8 buf[1024];
         /* Use fast method and generate single undo record */
@@ -869,8 +1165,9 @@ void do_transpose(EditState *s, int cmd)
         eb_read(b, offset0, buf + size2 + size1, size0);
         eb_write(b, offset0, buf, size0 + size1 + size2);
     } else {
-        EditBuffer *b1 = eb_new("*tmp*", BF_SYSTEM | (b->flags & BF_STYLES));
-
+        EditBuffer *b1 = qe_new_buffer(qs, "*tmp*", BF_SYSTEM | (b->flags & BF_STYLES));
+        if (!b1)
+            return;
         eb_set_charset(b1, b->charset, b->eol_type);
         /* Use eb_insert_buffer_convert to copy styles.
          * This conversion should not change sizes */
@@ -887,19 +1184,19 @@ void do_transpose(EditState *s, int cmd)
 
 /*---------------- help ----------------*/
 
-int qe_list_bindings(const CmdDef *d, ModeDef *mode, int inherit, char *buf, int size)
+int qe_list_bindings(QEmacsState *qs, const CmdDef *d, ModeDef *mode, int inherit, char *buf, int size)
 {
     buf_t outbuf, *out;
     ModeDef *mode0 = mode;
 
     out = buf_init(&outbuf, buf, size);
     for (;;) {
-        KeyDef *kd = mode ? mode->first_key : qe_state.first_key;
+        KeyDef *kd = mode ? mode->first_key : qs->first_key;
 
         for (; kd != NULL; kd = kd->next) {
             /* do not list overridden bindings */
             if (kd->cmd == d
-            &&  qe_find_current_binding(kd->keys, kd->nb_keys, mode0, 1) == kd) {
+            &&  qe_find_current_binding(qs, kd->keys, kd->nb_keys, mode0, 1) == kd) {
                 if (out->len > 0)
                     buf_puts(out, ", ");
 
@@ -917,13 +1214,14 @@ int qe_list_bindings(const CmdDef *d, ModeDef *mode, int inherit, char *buf, int
 void do_show_bindings(EditState *s, const char *cmd_name)
 {
     char buf[256];
+    QEmacsState *qs = s->qs;
     const CmdDef *d;
 
-    if ((d = qe_find_cmd(cmd_name)) == NULL) {
-        put_status(s, "No command %s", cmd_name);
+    if ((d = qe_find_cmd(qs, cmd_name)) == NULL) {
+        put_error(s, "No command %s", cmd_name);
         return;
     }
-    if (qe_list_bindings(d, s->mode, 1, buf, sizeof(buf))) {
+    if (qe_list_bindings(qs, d, s->mode, 1, buf, sizeof(buf))) {
         put_status(s, "%s is bound to %s", cmd_name, buf);
     } else {
         put_status(s, "%s is not bound to any key", cmd_name);
@@ -935,11 +1233,11 @@ static void do_describe_function(EditState *s, const char *cmd_name) {
     const CmdDef *d;
     const char *desc;
 
-    if ((d = qe_find_cmd(cmd_name)) == NULL) {
-        put_status(s, "No command %s", cmd_name);
+    if ((d = qe_find_cmd(s->qs, cmd_name)) == NULL) {
+        put_error(s, "No command %s", cmd_name);
         return;
     }
-    b = new_help_buffer();
+    b = new_help_buffer(s);
     if (!b)
         return;
 
@@ -969,7 +1267,7 @@ static int eb_sort_span(EditBuffer *b, int *pp1, int *pp2, int cur_offset, int f
 
 static void print_bindings(EditBuffer *b, ModeDef *mode)
 {
-    struct QEmacsState *qs = &qe_state;
+    struct QEmacsState *qs = b->qs;
     char buf[256];
     const CmdDef *d;
     int gfound, start, stop, i, j;
@@ -978,7 +1276,7 @@ static void print_bindings(EditBuffer *b, ModeDef *mode)
     gfound = 0;
     for (i = 0; i < qs->cmd_array_count; i++) {
         for (j = qs->cmd_array[i].count, d = qs->cmd_array[i].array; j-- > 0; d++) {
-            if (qe_list_bindings(d, mode, 0, buf, sizeof(buf))) {
+            if (qe_list_bindings(qs, d, mode, 0, buf, sizeof(buf))) {
                 if (!gfound) {
                     if (mode) {
                         eb_printf(b, "\n%s mode bindings:\n\n", mode->name);
@@ -1002,7 +1300,7 @@ void do_describe_bindings(EditState *s, int argval)
 {
     EditBuffer *b;
 
-    b = new_help_buffer();
+    b = new_help_buffer(s);
     if (!b)
         return;
 
@@ -1014,66 +1312,67 @@ void do_describe_bindings(EditState *s, int argval)
 
 void do_apropos(EditState *s, const char *str)
 {
-    QEmacsState *qs = s->qe_state;
+    QEmacsState *qs = s->qs;
     char buf[256];
     EditBuffer *b;
     const CmdDef *d;
     VarDef *vp;
-    int found_command, found_variable, start, stop, i, j;
+    int start, stop, i, j, extra;
 
-    b = new_help_buffer();
+    b = new_help_buffer(s);
     if (!b)
         return;
 
     eb_putc(b, '\n');
 
-    start = b->offset;
-    found_command = 0;
-    for (i = 0; i < qs->cmd_array_count; i++) {
-        for (j = qs->cmd_array[i].count, d = qs->cmd_array[i].array; j-- > 0; d++) {
-            const char *desc = d->spec + strlen(d->spec) + 1;
-            if (strstr(d->name, str) || strstr(desc, str)) {
-                /* print name, prototype, bindings */
-                eb_command_print_entry(b, d, s);
+    stop = 1;
+    for (extra = 0; extra < 2; extra++) {
+        start = b->offset;
+        for (i = 0; i < qs->cmd_array_count; i++) {
+            for (j = qs->cmd_array[i].count, d = qs->cmd_array[i].array; j-- > 0; d++) {
+                const char *desc = d->spec + strlen(d->spec) + 1;
+                if ((!strstr(d->name, str)) == extra && (!extra || strstr(desc, str))) {
+                    /* print name, prototype, bindings */
+                    eb_command_print_entry(b, d, s);
+                    eb_putc(b, '\n');
+                    if (*desc) {
+                        /* print short description */
+                        eb_printf(b, "  %s\n", desc);
+                    }
+                }
+            }
+        }
+        stop = b->offset;
+        if (start < stop) {
+            eb_sort_span(b, &start, &stop, stop, SF_DICT | SF_PARAGRAPH | SF_SILENT);
+            eb_putc(b, '\n');
+        }
+
+        start = b->offset;
+        for (vp = qs->first_variable; vp; vp = vp->next) {
+            const char *desc = vp->desc ? vp->desc : "";
+            if ((!strstr(vp->name, str)) == extra && (!extra || strstr(desc, str))) {
+                /* print class, name and current value */
+                eb_variable_print_entry(b, vp, s);
                 eb_putc(b, '\n');
                 if (*desc) {
                     /* print short description */
                     eb_printf(b, "  %s\n", desc);
                 }
-                found_command = 1;
             }
         }
-    }
-    if (found_command) {
         stop = b->offset;
-        eb_sort_span(b, &start, &stop, stop, SF_DICT | SF_PARAGRAPH | SF_SILENT);
-    }
-
-    start = b->offset;
-    found_variable = 0;
-    for (vp = qs->first_variable; vp; vp = vp->next) {
-        if (strstr(vp->name, str)) {
-            /* print class, name and current value */
-            eb_variable_print_entry(b, vp, s);
+        if (start < stop) {
+            eb_sort_span(b, &start, &stop, stop, SF_DICT | SF_PARAGRAPH | SF_SILENT);
             eb_putc(b, '\n');
-            if (vp->desc && *vp->desc) {
-                /* print short description */
-                eb_printf(b, "  %s\n", vp->desc);
-            }
-            found_variable = 1;
         }
     }
-    if (found_variable) {
-        stop = b->offset;
-        eb_sort_span(b, &start, &stop, stop, SF_DICT | SF_PARAGRAPH | SF_SILENT);
-    }
-
-    if (found_command + found_variable) {
+    if (stop > 1) {
         snprintf(buf, sizeof buf, "Apropos '%s'", str);
         show_popup(s, b, buf);
     } else {
         eb_free(&b);
-        put_status(s, "No apropos matches for `%s'", str);
+        put_error(s, "No apropos matches for `%s'", str);
     }
 }
 
@@ -1083,14 +1382,17 @@ extern char **environ;
 
 static void do_about_qemacs(EditState *s)
 {
-    QEmacsState *qs = s->qe_state;
+    QEmacsState *qs = s->qs;
     char buf[256];
     EditBuffer *b;
     ModeDef *m;
     const CmdDef *d;
     int start, stop, i, j;
 
-    b = eb_scratch("*About QEmacs*", BF_UTF8);
+    b = qe_new_buffer(qs, "*About QEmacs*", BC_REUSE | BC_CLEAR | BF_UTF8);
+    if (!b)
+        return;
+
     eb_printf(b, "\n  %s\n\n%s\n", str_version, str_credits);
 
     /* list current bindings */
@@ -1221,6 +1523,83 @@ static int qe_term_get_style(const char *str, QETermStyle *style)
     return 0;
 }
 
+static int qe_term_get_style_string(char *dest, size_t size, QEStyleDef *stp)
+{
+    buf_t out[1];
+    char buf[16];
+    const char *p;
+
+    buf_init(out, dest, size);
+#if 0
+    if (stp->attr & QE_TERM_BOLD)
+        buf_printf(out, " %s", "bold");
+    if (stp->attr & QE_TERM_ITALIC)
+        buf_printf(out, " %s", "italic");
+    if (stp->attr & QE_TERM_UNDERLINE)
+        buf_printf(out, " %s", "underlined");
+    if (stp->attr & QE_TERM_BLINK)
+        buf_printf(out, " %s", "blinking");
+#endif
+    p = css_get_color_name(buf, sizeof buf, stp->fg_color, TRUE);
+    buf_printf(out, " %s", p);
+    if (stp->bg_color != COLOR_TRANSPARENT) {
+        p = css_get_color_name(buf, sizeof buf, stp->bg_color, TRUE);
+        buf_printf(out, " on %s", p);
+    }
+    switch (stp->font_style) {
+    case QE_FONT_FAMILY_SERIF:
+        buf_printf(out, " %s", "times");
+        break;
+    case QE_FONT_FAMILY_SANS:
+        buf_printf(out, " %s", "arial");
+        break;
+    case QE_FONT_FAMILY_FIXED:
+        buf_printf(out, " %s", "fixed");
+        break;
+    }
+    if (stp->font_size)
+        buf_printf(out, " %dpt", stp->font_size);
+    return out->len;
+}
+
+/* Note: we use the same syntax as CSS styles to ease merging */
+static void do_set_style_color(EditState *e, const char *stylestr, const char *value)
+{
+    QEStyleDef *stp;
+    char buf[32];
+    const char *p;
+
+    stp = find_style(stylestr);
+    if (!stp) {
+        put_error(e, "Unknown style '%s'", stylestr);
+        return;
+    }
+
+    /* accept "fgcolor", "[fgcolor]/bgcolor", "fgcolor on bgcolor" */
+    p = value + strcspn(value, " /");
+    if (p > value) {
+        pstrncpy(buf, sizeof buf, value, p - value);
+        if (css_get_color(&stp->fg_color, buf)) {
+            put_error(e, "Unknown fgcolor '%s'", buf);
+            return;
+        }
+    }
+    qe_skip_spaces(&p);
+    if (*p == '/') {
+        p++;
+    } else {
+        strstart(p, "on ", &p);
+    }
+    qe_skip_spaces(&p);
+    if (*p) {
+        if (css_get_color(&stp->bg_color, p)) {
+            put_error(e, "Unknown bgcolor '%s'", p);
+            return;
+        }
+    }
+    e->qs->complete_refresh = 1;
+}
+
 static void do_set_region_color(EditState *s, const char *str)
 {
     int offset, size;
@@ -1230,7 +1609,7 @@ static void do_set_region_color(EditState *s, const char *str)
     s->region_style = 0;
 
     if (qe_term_get_style(str, &style)) {
-        put_status(s, "Invalid color '%s'", str);
+        put_error(s, "Invalid color '%s'", str);
         return;
     }
 
@@ -1241,9 +1620,26 @@ static void do_set_region_color(EditState *s, const char *str)
         size = -size;
     }
     if (size > 0) {
-        eb_create_style_buffer(s->b, QE_TERM_STYLE_BITS <= 16 ? BF_STYLE2 :
-                               QE_TERM_STYLE_BITS <= 32 ? BF_STYLE4 : BF_STYLE8);
+        eb_create_style_buffer(s->b, BF_STYLE_COMP);
         eb_set_style(s->b, style, LOGOP_WRITE, offset, size);
+    }
+}
+
+static void do_read_color(EditState *s, const char *str, int argval)
+{
+    char buf[32];
+    int len;
+    QEColor color;
+
+    if (!css_get_color(&color, str) && color != COLOR_TRANSPARENT) {
+        len = snprintf(buf, sizeof buf, "#%06x", color & 0xFFFFFF);
+        if (argval > 1) {
+            if (check_read_only(s))
+                return;
+            s->offset += eb_insert(s->b, s->offset, buf, len);
+        } else {
+            put_status(s, "-> %s", buf);
+        }
     }
 }
 
@@ -1258,7 +1654,7 @@ static void do_set_region_style(EditState *s, const char *str)
 
     st = find_style(str);
     if (!st) {
-        put_status(s, "Invalid style '%s'", str);
+        put_error(s, "Invalid style '%s'", str);
         return;
     }
     style = st - qe_styles;
@@ -1270,8 +1666,7 @@ static void do_set_region_style(EditState *s, const char *str)
         size = -size;
     }
     if (size > 0) {
-        eb_create_style_buffer(s->b, QE_TERM_STYLE_BITS <= 16 ? BF_STYLE2 :
-                               QE_TERM_STYLE_BITS <= 32 ? BF_STYLE4 : BF_STYLE8);
+        eb_create_style_buffer(s->b, BF_STYLE_COMP);
         eb_set_style(s->b, style, LOGOP_WRITE, offset, size);
     }
 }
@@ -1294,7 +1689,7 @@ static void do_describe_buffer(EditState *s, int argval)
     EditBuffer *b = s->b;
     EditBuffer *b1;
 
-    b1 = new_help_buffer();
+    b1 = new_help_buffer(s);
     if (!b1)
         return;
 
@@ -1305,6 +1700,7 @@ static void do_describe_buffer(EditState *s, int argval)
     eb_printf(b1, "    modified: %d\n", b->modified);
     eb_printf(b1, "  total_size: %d\n", b->total_size);
     eb_printf(b1, "        mark: %d\n", b->mark);
+    eb_printf(b1, "    refcount: %d\n", b->ref_count);
     eb_printf(b1, "   s->offset: %d\n", s->offset);
     eb_printf(b1, "   b->offset: %d\n", b->offset);
 
@@ -1357,8 +1753,6 @@ static void do_describe_buffer(EditState *s, int argval)
 
     if (b->data_mode)
         eb_printf(b1, "   data_mode: %s\n", b->data_mode->name);
-    if (b->syntax_mode)
-        eb_printf(b1, " syntax_mode: %s\n", b->syntax_mode->name);
     if (s->mode)
         eb_printf(b1, "     s->mode: %s\n", s->mode->name);
     if (b->default_mode)
@@ -1474,7 +1868,7 @@ static void do_describe_window(EditState *s, int argval)
     EditBuffer *b1;
     int w;
 
-    b1 = new_help_buffer();
+    b1 = new_help_buffer(s);
     if (!b1)
         return;
 
@@ -1510,12 +1904,12 @@ static void do_describe_window(EditState *s, int argval)
               s->wrap == WRAP_LINE ? "LINE" :
               s->wrap == WRAP_TERM ? "TERM" :
               s->wrap == WRAP_WORD ? "WORD" : "???");
-    eb_printf(b1, "%*s: %d\n", w, "indent_size", s->indent_size);
+    eb_printf(b1, "%*s: %d\n", w, "indent_width", s->indent_width);
     eb_printf(b1, "%*s: %d\n", w, "indent_tabs_mode", s->indent_tabs_mode);
     eb_printf(b1, "%*s: %d\n", w, "interactive", s->interactive);
     eb_printf(b1, "%*s: %d\n", w, "force_highlight", s->force_highlight);
     eb_printf(b1, "%*s: %d\n", w, "mouse_force_highlight", s->mouse_force_highlight);
-    eb_printf(b1, "%*s: %p\n", w, "colorize_func", (void*)s->colorize_func);
+    eb_printf(b1, "%*s: %s\n", w, "colorize_mode", s->colorize_mode ? s->colorize_mode->name : "none");
     eb_printf(b1, "%*s: %lld\n", w, "default_style", (long long)s->default_style);
     eb_printf(b1, "%*s: %s\n", w, "buffer", s->b->name);
     if (s->last_buffer)
@@ -1524,17 +1918,30 @@ static void do_describe_window(EditState *s, int argval)
     eb_printf(b1, "%*s: %d\n", w, "colorize_nb_lines", s->colorize_nb_lines);
     eb_printf(b1, "%*s: %d\n", w, "colorize_nb_valid_lines", s->colorize_nb_valid_lines);
     eb_printf(b1, "%*s: %d\n", w, "colorize_max_valid_offset", s->colorize_max_valid_offset);
-    if (s->colorize_nb_lines) {
-        int pos = eb_printf(b1, "%*s: {", w, "colorize_states");
-        int i;
-        for (i = 0; i < s->colorize_nb_lines; i++) {
-            if (s->colorize_states[i]) {
-                if (pos > 60)
-                    pos = eb_printf(b1, "\n%*s   ", w, "");
-                pos += eb_printf(b1, " %d: %x,", i, s->colorize_states[i]);
-            }
+    if (s->colorize_nb_valid_lines) {
+        int pos = eb_printf(b1, "%*s: [%d] {", w, "colorize_states", s->colorize_nb_valid_lines);
+        int i, from, len;
+        int bits = 0;
+        int w1;
+        char buf[32];
+        for (i = 0; i < s->colorize_nb_valid_lines; i++) {
+            bits |= s->colorize_states[i];
         }
-        eb_printf(b1, "\n");
+        w1 = snprintf(buf, sizeof buf, "%x", bits);
+        for (i = 0; i < s->colorize_nb_valid_lines;) {
+            bits = s->colorize_states[i];
+            for (from = i++; i < s->colorize_nb_valid_lines; i++) {
+                if (s->colorize_states[i] != bits)
+                    break;
+            }
+            if (pos > 60)
+                pos = eb_printf(b1, "\n%*s   ", w, "");
+            len = snprintf(buf, sizeof buf, "%d", from);
+            if (i > from + 1)
+                len += snprintf(buf + len, sizeof(buf) - len, "..%d", i - 1);
+            pos += eb_printf(b1, " %s: 0x%*x,", buf, w1, bits);
+        }
+        eb_printf(b1, " }\n");
     }
     eb_printf(b1, "%*s: %d\n", w, "busy", s->busy);
     eb_printf(b1, "%*s: %d\n", w, "display_invalid", s->display_invalid);
@@ -1553,7 +1960,7 @@ static void do_describe_screen(EditState *e, int argval)
     EditBuffer *b1;
     int w;
 
-    b1 = new_help_buffer();
+    b1 = new_help_buffer(e);
     if (!b1)
         return;
 
@@ -1613,9 +2020,8 @@ static int chunk_cmp(void *vp0, const void *vp1, const void *vp2) {
     int pos1, pos2;
 
     if ((++cp->ncmp & 8191) == 8191) {
-        QEmacsState *qs = &qe_state;
-        put_status(NULL, "Sorting: %d%%", (int)((cp->ncmp * 90LL) / cp->total_cmp));
-        dpy_flush(qs->screen);
+        QEmacsState *qs = cp->b->qs;
+        put_status(qs->active_window, "&Sorting: %d%%", (int)((cp->ncmp * 90LL) / cp->total_cmp));
     }
     if (cp->flags & SF_REVERSE) {
         p1 = vp2;
@@ -1796,7 +2202,9 @@ static int eb_sort_span(EditBuffer *b, int *pp1, int *pp2, int cur_offset, int f
     }
     qe_qsort_r(chunk_array, lines, sizeof(*chunk_array), &ctx, chunk_cmp);
 
-    b1 = eb_new("*sorted*", BF_SYSTEM | (b->flags & BF_STYLES));
+    b1 = qe_new_buffer(b->qs, "*sorted*", BF_SYSTEM | (b->flags & BF_STYLES));
+    if (!b1)
+        return -1;
     eb_set_charset(b1, b->charset, b->eol_type);
 
     for (i = 0; i < lines; i++) {
@@ -1806,9 +2214,7 @@ static int eb_sort_span(EditBuffer *b, int *pp1, int *pp2, int cur_offset, int f
         // XXX: style issue. Should include newline from source buffer
         eb_putc(b1, '\n');
         if ((i & 8191) == 8191 && !(flags & SF_SILENT)) {
-            QEmacsState *qs = &qe_state;
-            put_status(NULL, "Sorting: %d%%", (int)(90 + i * 10LL / lines));
-            dpy_flush(qs->screen);
+            put_status(b->qs->active_window, "&Sorting: %d%%", (int)(90 + i * 10LL / lines));
         }
     }
     eb_delete_range(b, p1, p2);
@@ -1818,14 +2224,14 @@ static int eb_sort_span(EditBuffer *b, int *pp1, int *pp2, int cur_offset, int f
     qe_free(&chunk_array);
 done:
     if (!(flags & SF_SILENT))
-        put_status(NULL, "%d lines sorted", lines);
+        put_status(b->qs->active_window, "%d lines sorted", lines);
     return 0;
 }
 
 static void do_sort_span(EditState *s, int p1, int p2, int argval, int flags) {
     s->region_style = 0;
     if (eb_sort_span(s->b, &p1, &p2, s->offset, flags | argval) < 0) {
-        put_status(s, "Out of memory");
+        put_error(s, "Out of memory");
         return;
     }
     s->b->mark = p1;
@@ -1843,15 +2249,15 @@ static void do_sort_buffer(EditState *s, int argval, int flags) {
 /*---------------- tag handling ----------------*/
 
 static void tag_buffer(EditState *s) {
-    char32_t buf[COLORED_MAX_LINE_SIZE];
-    QETermStyle sbuf[COLORED_MAX_LINE_SIZE];
+    QEColorizeContext cp[1];
     int offset, line_num, col_num;
 
-    if (s->colorize_func || s->b->b_styles) {
+    if (s->colorize_mode || s->b->b_styles) {
+        cp_initialize(cp, s);
         /* force complete buffer colorization */
         eb_get_pos(s->b, &line_num, &col_num, s->b->total_size);
-        get_colorized_line(s, buf, countof(buf), sbuf,
-                           s->b->total_size, &offset, line_num);
+        get_colorized_line(cp, s->b->total_size, &offset, line_num);
+        cp_destroy(cp);
     }
 }
 
@@ -1874,8 +2280,8 @@ static int tag_print_entry(CompleteState *cp, EditState *s, const char *name) {
     if (cp->target) {
         EditBuffer *b = cp->target->b;
         QEProperty *p;
-        if (!s->colorize_func && cp->target->colorize_func) {
-            set_colorize_func(s, cp->target->colorize_func, cp->target->colorize_mode);
+        if (!s->colorize_mode && cp->target->colorize_mode) {
+            set_colorize_mode(s, cp->target->colorize_mode);
         }
         for (p = b->property_list; p; p = p->next) {
             if (p->type == QE_PROP_TAG && strequal(p->data, name)) {
@@ -1905,17 +2311,31 @@ static int tag_get_entry(EditState *s, char *dest, int size, int offset)
 }
 
 static void do_find_tag(EditState *s, const char *str) {
+    QEmacsState *qs = s->qs;
     QEProperty *p;
+    int offset = -1;
 
     tag_buffer(s);
 
+    if (!qs->first_transient_key)
+        qe_register_transient_binding(qs, "goto-tag", ",, .");
+
     for (p = s->b->property_list; p; p = p->next) {
         if (p->type == QE_PROP_TAG && strequal(p->data, str)) {
-            s->offset = p->offset;
-            return;
+            if (offset < 0)
+                offset = p->offset;
+            if (s->offset < p->offset) {
+                s->offset = p->offset;
+                return;
+            }
         }
     }
-    put_status(s, "Tag not found: %s", str);
+    if (offset >= 0) {
+        /* target not found after point, use first match */
+        s->offset = offset;
+        return;
+    }
+    put_error(s, "Tag not found: %s", str);
 }
 
 static void do_goto_tag(EditState *s) {
@@ -1924,11 +2344,11 @@ static void do_goto_tag(EditState *s) {
 
     len = qe_get_word(s, buf, sizeof buf, s->offset, NULL);
     if (len >= sizeof(buf)) {
-        put_status(s, "Tag too large");
+        put_error(s, "Tag too large");
         return;
     } else
     if (len == 0) {
-        put_status(s, "No tag");
+        put_error(s, "No tag");
         return;
     } else {
         do_find_tag(s, buf);
@@ -1943,7 +2363,7 @@ static void do_list_tags(EditState *s, int argval) {
     QEProperty *p;
     EditState *e1;
 
-    b = new_help_buffer();
+    b = new_help_buffer(s);
     if (!b)
         return;
 
@@ -1961,13 +2381,16 @@ static void do_list_tags(EditState *s, int argval) {
     }
 
     e1 = show_popup(s, b, buf);
-    if (s->colorize_func) {
-        set_colorize_func(e1, s->colorize_func, s->colorize_mode);
+    if (s->colorize_mode) {
+        set_colorize_mode(e1, s->colorize_mode);
     }
 }
 
 static CompletionDef tag_completion = {
-    "tag", tag_complete, tag_print_entry, tag_get_entry
+    .name = "tag",
+    .enumerate = tag_complete,
+    .print_entry = tag_print_entry,
+    .get_entry = tag_get_entry,
 };
 
 /*---------------- Unicode character name completion ----------------*/
@@ -1975,12 +2398,13 @@ static CompletionDef tag_completion = {
 static void charname_complete(CompleteState *cp, CompleteFunc enumerate) {
     char buf[256];
     char entry[264]; // silence compiler warning on snprintf calls below
+    QEmacsState *qs = cp->s->qs;
     FILE *fp;
 
     /* enumerate Unicode character names from Unicode consortium data */
-    if ((fp = open_resource_file("DerivedName-15.0.0.txt")) != NULL
-    ||  (fp = open_resource_file("DerivedName.txt")) != NULL
-    ||  (fp = open_resource_file("extracted/DerivedName.txt")) != NULL) {
+    if ((fp = qe_open_resource_file(qs, "DerivedName-15.0.0.txt")) != NULL
+    ||  (fp = qe_open_resource_file(qs, "DerivedName.txt")) != NULL
+    ||  (fp = qe_open_resource_file(qs, "extracted/DerivedName.txt")) != NULL) {
         while (fgets(buf, sizeof buf, fp)) {
             char *p1, *p2, *p3;
             if ((p1 = strchr(buf, ';')) != NULL
@@ -1999,8 +2423,8 @@ static void charname_complete(CompleteState *cp, CompleteFunc enumerate) {
         }
         fclose(fp);
     } else
-    if ((fp = open_resource_file("UnicodeData-15.0.0.txt")) != NULL
-    ||  (fp = open_resource_file("UnicodeData.txt")) != NULL) {
+    if ((fp = qe_open_resource_file(qs, "UnicodeData-15.0.0.txt")) != NULL
+    ||  (fp = qe_open_resource_file(qs, "UnicodeData.txt")) != NULL) {
         while (fgets(buf, sizeof buf, fp)) {
             char *p1, *p2;
             if ((p1 = strchr(buf, ';')) != NULL
@@ -2015,21 +2439,22 @@ static void charname_complete(CompleteState *cp, CompleteFunc enumerate) {
         }
         fclose(fp);
     } else {
-        put_status(cp->s, "cannot find DerivedName.txt or UnicodeData.txt in QEPATH");
+        put_error(cp->s, "Cannot find DerivedName.txt or UnicodeData.txt in QEPATH");
     }
 }
 
-static long charname_convert_entry(const char *str, const char **endp) {
+static long charname_convert_entry(EditState *s, const char *str, const char **endp) {
     char buf[256];
+    QEmacsState *qs = s->qs;
     FILE *fp;
     long code = strtol_c(str, endp, 0);
     if (**endp == '\0')
         return code;
 
     /* enumerate Unicode character names from Unicode consortium data */
-    if ((fp = open_resource_file("DerivedName-15.0.0.txt")) != NULL
-    ||  (fp = open_resource_file("DerivedName.txt")) != NULL
-    ||  (fp = open_resource_file("extracted/DerivedName.txt")) != NULL) {
+    if ((fp = qe_open_resource_file(qs, "DerivedName-15.0.0.txt")) != NULL
+    ||  (fp = qe_open_resource_file(qs, "DerivedName.txt")) != NULL
+    ||  (fp = qe_open_resource_file(qs, "extracted/DerivedName.txt")) != NULL) {
         while (fgets(buf, sizeof buf, fp)) {
             char *p1, *p2;
             if ((p1 = strchr(buf, ';')) != NULL
@@ -2045,8 +2470,8 @@ static long charname_convert_entry(const char *str, const char **endp) {
         }
         fclose(fp);
     } else
-    if ((fp = open_resource_file("UnicodeData-15.0.0.txt")) != NULL
-    ||  (fp = open_resource_file("UnicodeData.txt")) != NULL) {
+    if ((fp = qe_open_resource_file(qs, "UnicodeData-15.0.0.txt")) != NULL
+    ||  (fp = qe_open_resource_file(qs, "UnicodeData.txt")) != NULL) {
         while (fgets(buf, sizeof buf, fp)) {
             char *p1, *p2;
             if ((p1 = strchr(buf, ';')) != NULL
@@ -2098,29 +2523,234 @@ static int charname_get_entry(EditState *s, char *dest, int size, int offset) {
 }
 
 static CompletionDef charname_completion = {
-    "charname", charname_complete, charname_print_entry, charname_get_entry,
-    charname_convert_entry
+    .name = "charname",
+    .enumerate = charname_complete,
+    .print_entry = charname_print_entry,
+    .get_entry = charname_get_entry,
+    .convert_entry = charname_convert_entry,
 };
+
+/*---------------- style and color ----------------*/
+
+static int eb_print_color(EditBuffer *b, const char *name) {
+    QETermStyle style = QE_STYLE_DEFAULT;
+    QETermStyle style2 = QE_STYLE_DEFAULT;
+    QEColor color = 0, rgb = 0;
+    char alt_name[16];
+    int len, len2, fg, bg = -1, dist = 0;
+
+    *alt_name = '\0';
+    if (!css_get_color(&color, name) && color != COLOR_TRANSPARENT) {
+        if (*name != '#') {
+            snprintf(alt_name, sizeof alt_name, "#%06x", color & 0xFFFFFF);
+        }
+        bg = qe_map_color(color, xterm_colors, QE_TERM_BG_COLORS, &dist);
+        fg = (color_y(color) >= 12800) ? 16 : 231;
+        style = QE_TERM_COMPOSITE | QE_TERM_MAKE_COLOR(fg, bg);
+        style2 = QE_TERM_COMPOSITE | QE_TERM_MAKE_COLOR(bg, 16);
+        rgb = qe_unmap_color(bg, 8192);
+    }
+    b->cur_style = QE_STYLE_FUNCTION;
+    len = eb_printf(b, "%s\t", name);
+    b->tab_width = max_int(b->tab_width, len + 1);
+    b->cur_style = QE_STYLE_DEFAULT;
+    len += eb_printf(b, " %-10s ", alt_name);
+    b->cur_style = style;
+    len += eb_puts(b, "[   ]");
+    b->cur_style = style2;
+    len += eb_puts(b, "[  Sample  ]");
+    b->cur_style = QE_STYLE_DEFAULT;
+    len2 = eb_printf(b, "  p%-4d", bg);
+    if (dist != 0)
+        len2 += eb_printf(b, "  dist=%-4d", dist);
+    if (color != rgb)
+        len2 += eb_printf(b, "  #%06x", rgb & 0xFFFFFF);
+    if (len2 < 32)
+        len += eb_printf(b, "%*s", 32 - len2, "");
+    return len + len2;
+}
+
+int color_print_entry(CompleteState *cp, EditState *s, const char *name) {
+    return eb_print_color(s->b, name);
+}
+
+static int eb_print_style(EditBuffer *b, const char *name, int style) {
+    QEStyleDef *stp = NULL;
+    char buf[80];
+    int i, len;
+
+    if (name != NULL) {
+        for (i = 0; i < QE_STYLE_NB; i++) {
+            if (!strcmp(name, qe_styles[i].name)) {
+                style = i;
+                break;
+            }
+        }
+    }
+    if (style >= 0 && style < QE_STYLE_NB) {
+        stp = &qe_styles[style];
+        name = stp->name;
+    }
+    b->cur_style = QE_STYLE_FUNCTION;
+    len = eb_printf(b, "%s\t", name);
+    b->tab_width = max_int(b->tab_width, len + 1);
+    b->cur_style = style;
+    len += eb_puts(b, "[  Sample  ]");
+    b->cur_style = QE_STYLE_DEFAULT;
+
+    *buf = '\0';
+    if (stp) {
+        qe_term_get_style_string(buf, sizeof buf, stp);
+    }
+    len += eb_printf(b, " %-40s", buf);
+    return len;
+}
+
+int style_print_entry(CompleteState *cp, EditState *s, const char *name) {
+    return eb_print_style(s->b, name, QE_STYLE_DEFAULT);
+}
+
+static void do_list_styles(EditState *s) {
+    EditBuffer *b;
+    int i;
+
+    b = new_help_buffer(s);
+    if (!b)
+        return;
+
+    for (i = 0; i < QE_STYLE_NB; i++) {
+        eb_print_style(b, NULL, i);
+        eb_putc(b, '\n');
+    }
+    show_popup(s, b, "Quick Emacs Styles");
+}
+
+static void do_list_colors(EditState *s, int argval) {
+    EditBuffer *b;
+    char buf[32];
+    int i;
+
+    b = qe_new_buffer(s->qs, "*Colors*",
+                      BC_REUSE | BC_CLEAR | BF_SYSTEM | BF_UTF8 | BF_STYLE8);
+    if (!b)
+        return;
+
+    for (i = 0; i < nb_qe_colors; i++) {
+        eb_print_color(b, qe_colors[i].name);
+        eb_putc(b, '\n');
+    }
+    for (i = 0; i < 8192; i++) {
+        snprintf(buf, sizeof buf, "p%d", i);
+        eb_print_color(b, buf);
+        eb_putc(b, '\n');
+    }
+    show_popup(s, b, "Quick Emacs Colors");
+}
 
 /*---------------- paragraph handling ----------------*/
 
-int eb_next_paragraph(EditBuffer *b, int offset) {
-    /* find end of paragraph around or after point:
-       skip blank lines, if any, then skip non blank lines
-       and return start of blank line before text.
+int eb_skip_whitespace(EditBuffer *b, int offset, int dir) {
+    /*@API buffer
+       Skip whitespace in a given direction.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @argument `dir` the skip direction (-1, 0, 1)
+       @return the new buffer position
      */
-    int text_found = 0;
-    offset = eb_goto_bol(b, offset);
-    while (offset < b->total_size) {
-        if (eb_is_blank_line(b, offset, NULL)) {
-            if (text_found)
-                break;
-        } else {
-            text_found = 1;
-        }
-        offset = eb_next_line(b, offset);
+    int p1;
+    if (dir > 0) {
+        while (offset < b->total_size && qe_isspace(eb_nextc(b, offset, &p1)))
+            offset = p1;
+    } else
+    if (dir < 0) {
+        while (offset > 0 && qe_isspace(eb_prevc(b, offset, &p1)))
+            offset = p1;
     }
     return offset;
+}
+
+int eb_skip_blank_lines(EditBuffer *b, int offset, int dir) {
+    /*@API buffer
+       Skip blank lines in a given direction
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @argument `dir` the skip direction (-1, 0, 1)
+       @return the new buffer position:
+       - the value of `offset` if not on a blank line
+       - the beginning of the first blank line if skipping backward
+       - the beginning of the next non-blank line if skipping forward
+     */
+    if (dir > 0) {
+        while (offset < b->total_size && eb_is_blank_line(b, offset, &offset))
+            continue;
+    } else {
+        int pos = eb_goto_bol(b, offset);
+        while (eb_is_blank_line(b, pos, NULL) && (offset = pos) > 0)
+            pos = eb_prev_line(b, pos);
+    }
+    return offset;
+}
+
+int eb_next_paragraph(EditBuffer *b, int offset) {
+    /*@API buffer
+       Find end of paragraph around or after point.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @return the new buffer position: skip any blank lines, then skip
+       non blank lines and return start of the blank line after text.
+     */
+    offset = eb_skip_blank_lines(b, offset, 1);
+    while (offset < b->total_size && !eb_is_blank_line(b, offset, NULL))
+        offset = eb_next_line(b, offset);
+    return offset;
+}
+
+int eb_prev_paragraph(EditBuffer *b, int offset) {
+    /*@API buffer
+       Find start of paragraph around or before point.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @return the new buffer position: skip any blank lines before
+       `offset`, then skip non blank lines and return start of the blank
+       line before text. */
+    offset = eb_skip_blank_lines(b, offset, -1);
+    while (offset > 0) {
+        offset = eb_prev_line(b, offset);
+        if (eb_is_blank_line(b, offset, NULL))
+            break;
+    }
+    return offset;
+}
+
+int eb_skip_paragraphs(EditBuffer *b, int offset, int n) {
+    /*@API buffer
+       Skip one or more paragraphs in a given direction.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @argument `n` the number of paragraphs to skip, `n` can be negative.
+       @return the new buffer position:
+       - the value of `offset` if `n` is `0`
+       - the beginning of the n-th previous paragraph if skipping backward:
+         the beginning of the paragraph text or the previous blank line
+         if any.
+       - the end of the n-th next paragraph if skipping forward:
+         the end of the paragraph text or the beginning of the next blank
+         line if any.
+     */
+    if (n < 0) {
+        while (n++ < 0 && offset > 0)
+            offset = eb_prev_paragraph(b, offset);
+    } else
+    if (n > 0) {
+        while (n-- > 0 && offset < b->total_size)
+            offset = eb_next_paragraph(b, offset);
+    }
+    return offset;
+}
+
+void do_forward_paragraph(EditState *s, int n) {
+    do_maybe_set_mark(s);
+    s->offset = eb_skip_paragraphs(s->b, s->offset, n);
 }
 
 void do_mark_paragraph(EditState *s, int n) {
@@ -2142,52 +2772,21 @@ void do_mark_paragraph(EditState *s, int n) {
        the next ARG paragraphs after the ones already marked.
      */
     int start = s->offset;
-    int end = s->region_style ? s->b->mark : s->offset;
-    if (n < 0) {
-        end = eb_prev_paragraph(s->b, end);
-        if (!s->region_style)
+    int end = s->b->mark;
+    if (!s->region_style) {
+        if (n < 0) {
+            end = eb_prev_paragraph(s->b, start);
             start = eb_next_paragraph(s->b, end);
-        while (++n < 0 && end > 0) {
-            end = eb_prev_paragraph(s->b, end);
-        }
-    } else
-    if (n > 0) {
-        end = eb_next_paragraph(s->b, end);
-        if (!s->region_style)
+            n++;
+        } else
+        if (n > 0) {
+            end = eb_next_paragraph(s->b, start);
             start = eb_prev_paragraph(s->b, end);
-        while (--n > 0 && end < s->b->total_size) {
-            end = eb_next_paragraph(s->b, end);
+            n--;
         }
     }
+    end = eb_skip_paragraphs(s->b, end, n);
     do_mark_region(s, end, start);
-}
-
-int eb_prev_paragraph(EditBuffer *b, int offset) {
-    /* find start of paragraph around or before point:
-       skip blank lines, if any, then skip non blank lines
-       and return start of blank line after end of text.
-     */
-    int text_found = 0;
-    offset = eb_goto_bol(b, offset);
-    while (offset > 0) {
-        if (eb_is_blank_line(b, offset, NULL)) {
-            if (text_found)
-                break;
-        } else {
-            text_found = 1;
-        }
-        offset = eb_prev_line(b, offset);
-    }
-    return offset;
-}
-
-void do_forward_paragraph(EditState *s, int n) {
-    for (; n < 0 && s->offset > 0; n++) {
-        s->offset = eb_prev_paragraph(s->b, s->offset);
-    }
-    for (; n > 0 && s->offset < s->b->total_size; n--) {
-        s->offset = eb_next_paragraph(s->b, s->offset);
-    }
 }
 
 void do_kill_paragraph(EditState *s, int n) {
@@ -2199,9 +2798,8 @@ void do_kill_paragraph(EditState *s, int n) {
        negative arg -N means kill backward to Nth start of paragraph.
      */
     if (n != 0) {
-        int start = s->offset;
-        do_forward_paragraph(s, n);
-        do_kill(s, start, s->offset, n, 0);
+        int end = eb_skip_paragraphs(s->b, s->offset, n);
+        do_kill(s, s->offset, end, n, 0);
     }
 }
 
@@ -2264,71 +2862,249 @@ static int get_indent_size(EditState *s, int p1, int p2) {
     return indent_size;
 }
 
-void do_fill_paragraph(EditState *s)
+/* mode=0: fill the current paragraph
+ * mode=1: fill all paragraphs in the current region
+ * mode=2: fill all paragraphs in the buffer
+ * mode=3: fill whole region as single paragraph
+ * if region is active, use mode=1 instead of mode=0
+ */
+void do_fill_paragraph(EditState *s, int mode, int argval)
 {
+    EditBuffer *b = s->b;
     /* buffer offsets, byte counts */
-    int par_start, par_end, offset, offset1, chunk_start, word_start;
+    int par_start, par_end, offset, offset1, chunk_start, word_start, end;
     /* number of characters / screen positions */
-    int col, indent0_size, indent_size, word_size;
+    int col, indent0_size, indent_size, word_size, nb;
+
+    par_start = end = s->offset;
+    if (mode == 1 || mode == 3 || s->region_style) {
+        par_start = min_offset(b->mark, s->offset);
+        end = max_offset(b->mark, s->offset);
+    }
+    if (mode == 2) {
+        par_start = 0;
+        end = b->total_size;
+    }
 
     /* find start & end of paragraph */
-    par_end = eb_next_paragraph(s->b, s->offset);
-    par_start = eb_prev_paragraph(s->b, par_end);
-    /* skip the blank line if any */
-    eb_is_blank_line(s->b, par_start, &par_start);
+    if (!eb_is_blank_line(b, end, NULL))
+        end = eb_next_paragraph(b, end);
+    par_start = eb_goto_bol(b, par_start);
+    if (!eb_is_blank_line(b, par_start, NULL))
+        par_start = eb_prev_paragraph(b, par_start);
 
-    /* compute indent sizes for first and second lines */
-    indent0_size = get_indent_size(s, par_start, par_end);
-    offset = eb_next_line(s->b, par_start);
-    indent_size = get_indent_size(s, offset, par_end);
-
-    /* reflow words to fill lines */
-    col = 0;
     offset = par_start;
-    while (offset < par_end) {
-        /* skip spaces */
-        chunk_start = offset;
-        while (offset < par_end) {
-            char32_t c = eb_nextc(s->b, offset, &offset1);
-            if (!qe_isspace(c))
-                break;
-            offset = offset1;
-        }
-        /* skip word */
-        word_start = offset;
-        word_size = 0;
-        while (offset < par_end) {
-            char32_t c = eb_nextc(s->b, offset, &offset1);
-            if (qe_isspace(c))
-                break;
-            offset = offset1;
-            /* handle variable width and combining glyphs */
-            word_size += qe_wcwidth(c);
-        }
+    for (;;) {
+        par_start = eb_skip_blank_lines(b, offset, 1);
 
-        if (chunk_start == par_start) {
-            /* preserve spaces at paragraph start */
-            col += indent0_size + word_size;
-        } else {
-            if (word_start == offset) {
-                /* space at end of paragraph: append a newline */
-                eb_respace(s->b, chunk_start, word_start, 1, 0);
-                break;
+        /* did we reach the end of the region? */
+        if (par_start >= end)
+            return;
+
+        /* compute indent sizes for first and second lines */
+        par_end = end;
+        if (mode != 3)
+            par_end = eb_next_paragraph(b, par_start);
+        if (end < par_end)
+            end = par_end;
+        indent_size = indent0_size = get_indent_size(s, par_start, par_end);
+        offset = eb_next_line(b, par_start);
+        if (offset < par_end)
+            indent_size = get_indent_size(s, offset, par_end);
+
+        /* reflow words to fill lines */
+        col = 0;
+        offset = par_start;
+        // XXX: should justify with spaces if C-u prefix
+        while (offset < par_end) {
+            /* skip spaces */
+            chunk_start = offset;
+            while (offset < par_end) {
+                char32_t c = eb_nextc(b, offset, &offset1);
+                if (!qe_isspace(c))
+                    break;
+                offset = offset1;
             }
-            if (col + 1 + word_size > s->b->fill_column) {
-                /* insert newline and indentation */
-                int nb = eb_respace(s->b, chunk_start, word_start, 1, indent_size);
-                offset += nb;
-                par_end += nb;
-                col = indent_size + word_size;
+            /* skip word */
+            word_start = offset;
+            word_size = 0;
+            while (offset < par_end) {
+                char32_t c = eb_nextc(b, offset, &offset1);
+                if (qe_isspace(c))
+                    break;
+                offset = offset1;
+                /* handle variable width and combining glyphs */
+                word_size += qe_wcwidth(c);
+            }
+
+            if (chunk_start == par_start) {
+                /* preserve spaces at paragraph start */
+                col += indent0_size + word_size;
             } else {
-                /* single space the word */
-                int nb = eb_respace(s->b, chunk_start, word_start, 0, 1);
+                if (word_start == offset) {
+                    /* space at end of paragraph: replace with a newline */
+                    nb = eb_respace(b, chunk_start, word_start, 1, 0);
+                    offset += nb;
+                    par_end += nb;
+                    end += nb;
+                    break;
+                }
+                if (col + 1 + word_size > b->fill_column) {
+                    /* insert newline and indentation */
+                    col = indent_size + word_size;
+                    nb = eb_respace(b, chunk_start, word_start, 1, indent_size);
+                } else {
+                    /* single space the word */
+                    col += 1 + word_size;
+                    nb = eb_respace(b, chunk_start, word_start, 0, 1);
+                }
                 offset += nb;
                 par_end += nb;
-                col += 1 + word_size;
+                end += nb;
             }
         }
+    }
+}
+
+/*---------------- sentence handling ----------------*/
+
+/* Sentence end: "[.?!\u2026\u203d][]\"'\u201d\u2019)}\u00bb\u203a]*" */
+
+int eb_next_sentence(EditBuffer *b, int offset) {
+    /*@API buffer
+       Find end of sentence after point.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @return the new buffer position: search for the sentence-end
+       pattern and skip it.
+     */
+    int p1, p2;
+    char32_t c, c2;
+    int start = offset;
+    int end = eb_next_paragraph(b, offset);
+    while (offset < end) {
+        c = eb_nextc(b, offset, &offset);
+        if (!(c == '.' || c == '?' || c == '!'))
+            continue;
+        for (;;) {
+            c = eb_nextc(b, offset, &p1);
+            if (c == ']' || c == '"' || c == '\'' || c == ')' || c == '}')
+                offset = p1;
+            else
+                break;
+        }
+        c2 = eb_nextc(b, p1, &p2);
+        if (c == ' ' && qe_isspace(c2))
+            return offset;
+        if (c == '\n' && p2 >= end)
+            return offset;
+    }
+    return max_int(start, eb_skip_whitespace(b, offset, -1));
+}
+
+int eb_prev_sentence(EditBuffer *b, int offset) {
+    /*@API buffer
+       Find start of sentence before point.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @return the new buffer position: first non blank character after end
+       of previous sentence.
+     */
+    int p1, p2, p3, end;
+    char32_t c, c2;
+
+    while (offset > 0) {
+        c = eb_prevc(b, offset, &offset);
+        if (!qe_findchar(".?! \t\n", c))
+            break;
+    }
+    end = eb_prev_paragraph(b, offset);
+    end = eb_skip_blank_lines(b, end, 1);
+
+    while ((p1 = offset) > end) {
+        c = eb_prevc(b, offset, &offset);
+        if (!(c == '.' || c == '?' || c == '!'))
+            continue;
+        for (;;) {
+            c = eb_nextc(b, p1, &p2);
+            if (c == ']' || c == '"' || c == '\'' || c == ')' || c == '}')
+                p1 = p2;
+            else
+                break;
+        }
+        c2 = eb_nextc(b, p2, &p3);
+        if (c == ' ' && qe_isspace(c2))
+            break;
+    }
+    return eb_skip_whitespace(b, p1, 1);
+}
+
+int eb_skip_sentences(EditBuffer *b, int offset, int n) {
+    /*@API buffer
+       Skip one or more sentences in a given direction.
+       @argument `b` a valid pointer to an `EditBuffer`
+       @argument `offset` the position in bytes in the buffer
+       @argument `n` the number of sentences to skip, `n` can be negative.
+       @return the new buffer position:
+       - the value of `offset` if `n` is `0`
+       - the beginning of the n-th previous sentence if skipping backward:
+         the beginning of the sentence text or the previous blank line
+         if any.
+       - the end of the n-th next sentence if skipping forward:
+         the end of the sentence text or the beginning of the next blank
+         line if any.
+     */
+    if (n < 0) {
+        while (n++ < 0 && offset > 0)
+            offset = eb_prev_sentence(b, offset);
+    } else
+    if (n > 0) {
+        while (n-- > 0 && offset < b->total_size)
+            offset = eb_next_sentence(b, offset);
+    }
+    return offset;
+}
+
+void do_forward_sentence(EditState *s, int n) {
+    do_maybe_set_mark(s);
+    s->offset = eb_skip_sentences(s->b, s->offset, n);
+}
+
+void do_mark_sentence(EditState *s, int n) {
+    /* mark-sentence:
+
+       mark_sentence(n = arg_val)
+
+       Put point at point, mark at end of sentence.
+       The sentence marked is the one that contains point or follows point.
+
+       With argument ARG, puts mark at end of a following sentence, so that
+       the number of sentences marked equals ARG.
+
+       If ARG is negative, point is put at point, mark is put
+       at beginning of this or a previous sentence.
+       The sentence marked is the one that contains point or precedes point.
+
+       If the current region is highlighted, it marks
+       the next ARG sentences after the ones already marked.
+     */
+    int start = s->offset;
+    int end = s->region_style ? s->b->mark : s->offset;
+    end = eb_skip_sentences(s->b, end, n);
+    do_mark_region(s, end, start);
+}
+
+void do_kill_sentence(EditState *s, int n) {
+    /*
+       kill_sentence(n = ARG)
+
+       Kill forward to end of sentence.
+       With arg N, kill forward to Nth end of sentence;
+       negative arg -N means kill backward to Nth start of sentence.
+     */
+    if (n != 0) {
+        int end = eb_skip_sentences(s->b, s->offset, n);
+        do_kill(s, s->offset, end, n, 0);
     }
 }
 
@@ -2344,12 +3120,46 @@ static const CmdDef extra_commands[] = {
           do_compare_files, ESsi,
           "s{Compare file: }[file]|file|"
           "v", 0) /* p? */
-    // XXX: delete-leading-space (mg) Delete any leading whitespace on the current line
-    // XXX: delete-trailing-space (mg) Delete any trailing whitespace on the current line
-    // XXX: delete-trailing-whitespace (emacs) Delete all the trailing whitespace across the current buffer.
-    CMD2( "delete-horizontal-space", "M-\\",
+    CMD2( "define-equivalent", "",
+          "Define equivalent strings for compare-windows",
+          do_define_equivalent, ESss,
+          "s{Enter string: }|equivalent|s{Equivalent to: }|equivalent|")
+    CMD2( "delete-equivalent", "",
+          "Delete a pair of equivalent strings",
+          do_delete_equivalent, ESs,
+          "s{Enter string: }|equivalent|")
+    CMD2( "list-equivalents", "",
+          "List equivalent strings",
+          do_list_equivalents, ESi, "p")
+
+    CMD3( "enlarge-window", "C-x ^",
+          "Enlarge window vertically",
+          do_adjust_window, ESii, "p" "v", QE_AW_ENLARGE | QE_AW_VERTICAL)
+    CMD3( "shrink-window", "C-x v",
+          "Shrink window vertically",
+          do_adjust_window, ESii, "p" "v", QE_AW_SHRINK | QE_AW_VERTICAL)
+    CMD3( "enlarge-window-horizontally", "C-x }",
+          "Enlarge window horizontally",
+          do_adjust_window, ESii, "p" "v", QE_AW_ENLARGE | QE_AW_HORIZONTAL)
+    CMD3( "shrink-window-horizontally", "C-x {",
+          "Shrink window horizontally",
+          do_adjust_window, ESii, "p" "v", QE_AW_SHRINK | QE_AW_HORIZONTAL)
+    CMD0( "resize-window", "C-x +",
+          "Resize window interactively using the cursor keys",
+          do_resize_window)
+
+    CMD3( "delete-leading-space", "",   // (mg)
+          "Delete any leading whitespace on the current line",
+          do_delete_horizontal_space, ESi, "*" "v", DH_BOL)
+    CMD3( "delete-trailing-space", "",   // (mg)
+          "Delete any trailing whitespace on the current line",
+          do_delete_horizontal_space, ESi, "*" "v", DH_EOL)
+    CMD3( "delete-trailing-whitespace", "", // (emacs)
+          "Delete all the trailing whitespace across the current buffer",
+          do_delete_horizontal_space, ESi, "*" "v", DH_FULL)
+    CMD3( "delete-horizontal-space", "M-\\",
           "Delete blanks around point",
-          do_delete_horizontal_space, ES, "*")
+          do_delete_horizontal_space, ESi, "*", DH_POINT)
     CMD2( "delete-blank-lines", "C-x C-o",
           "Delete blank lines on and/or around point",
           do_delete_blank_lines, ES, "*")
@@ -2367,11 +3177,32 @@ static const CmdDef extra_commands[] = {
           do_untabify, ESii, "*" "ze")
 
     CMD2( "indent-region", "M-C-\\",
-          "Indent each nonblank line in the region",
-          do_indent_region, ESii, "*" "md")
+          "Indent each nonblank line that starts inside the region",
+          do_indent_region, ESiii, "*" "mdp")
+    CMD2( "unindent-region", "M-C-|",
+          "Unindent each nonblank line that starts inside the region",
+          do_indent_region, ESiii, "*" "mdq")
     CMD2( "indent-buffer", "",
           "Indent each nonblank line in the buffer",
-          do_indent_region, ESii, "*" "ze")
+          do_indent_region, ESiii, "*" "zep")
+    CMD2( "unindent-buffer", "",
+          "Unindent each nonblank line in the buffer",
+          do_indent_region, ESiii, "*" "zeq")
+    CMD2( "indent-rigidly", "C-x TAB",
+          "Indent the region interactively",
+          do_indent_rigidly, ESiii, "*" "md" "P")
+    CMD3( "indent-rigidly-left", "",
+          "Decrease the region indentation",
+          do_indent_rigidly_by, ESiii, "*" "md" "v", -1)
+    CMD3( "indent-rigidly-right", "",
+          "Increase the region indentation",
+          do_indent_rigidly_by, ESiii, "*" "md" "v", +1)
+    CMD3( "indent-rigidly-left-to-tab-stop", "",
+          "Decrease the region indentation by one tab width",
+          do_indent_rigidly_to_tab_stop, ESiii, "*" "md" "v", -1)
+    CMD3( "indent-rigidly-right-to-tab-stop", "",
+          "Increase the region indentation by one tab width",
+          do_indent_rigidly_to_tab_stop, ESiii, "*" "md" "v", +1)
 
     CMD2( "show-date-and-time", "C-x t",
           "Show current date and time",
@@ -2389,7 +3220,7 @@ static const CmdDef extra_commands[] = {
     CMD2( "kill-block", "M-C-k",
           "Kill from point to the end of the next block",
           do_kill_block, ESi, "p")
-          /* Should also have mark-block on C-M-@ */
+          /* Should also have mark-block on M-C-@ */
 
     CMD3( "transpose-chars", "C-t",
           "Swap character at point and before it",
@@ -2416,10 +3247,17 @@ static const CmdDef extra_commands[] = {
           "s{Unset key locally: }[key]"
           "v", 1)
 
-    // XXX: should have `qemacs-hello` on `C-h h` testing charsets
-    // XXX: should have `qemacs-manual` on `C-h m`
-    // XXX: should have `qemacs-faq` on `C-h C-f`
-    //      use do_load_file_from_path() to load the above
+    // XXX: the commands below should use do_load_file_from_path()
+    CMDx( "qemacs-hello", "C-h h",
+          "Create a test buffer with various charsets",
+          do_qemacs_hello)
+    CMDx( "qemacs-manual", "C-h m",
+          "Show the Quick Emacs manual",
+          do_qemacs_manual)
+    CMDx( "qemacs-faq", "C-h C-f",
+          "Show the Quick Emacs FAQ",
+          do_qemacs_faq)
+
     CMD0( "about-qemacs", "C-h ?, f1",
           "Display information about Quick Emacs",
           do_about_qemacs)
@@ -2448,7 +3286,7 @@ static const CmdDef extra_commands[] = {
     CMD2( "set-region-color", "C-c c",
           "Set the color for the current region",
           do_set_region_color, ESs,
-          "s{Select color: }[color]|color|")
+          "s{Select color: }[.color]|color|")
     CMD2( "set-region-style", "C-c s",
           "Set the style for the current region",
           do_set_region_style, ESs,
@@ -2456,6 +3294,21 @@ static const CmdDef extra_commands[] = {
     CMD0( "drop-styles", "",
           "Remove all styles for the current buffer",
           do_drop_styles)
+    CMD2( "set-style-color", "C-c x",
+          "Set the color(s) for a named style",
+          do_set_style_color, ESss,
+          "s{Style: }[style]|style|"
+          "s{Style color: }[.color]|color|")
+    CMD2( "read-color", "C-c #",
+          "Read a color and produce its hex RGB value",
+          do_read_color, ESsi,
+          "s{Color: }[color]|color|" "p")
+    CMD2( "list-colors", "C-c C",
+          "List available colors",
+          do_list_colors, ESi, "p")
+    CMD2( "list-styles", "C-c S",
+          "List available styles and their definitions",
+          do_list_styles, ES, "")
 
     CMD2( "set-eol-type", "",
           "Set the end of line style: [0=Unix, 1=Dos, 2=Mac]",
@@ -2480,7 +3333,7 @@ static const CmdDef extra_commands[] = {
           "Sort the lines in the region as numbers",
           do_sort_region, ESii, "*" "p" "v", SF_NUMBER)
     CMD3( "sort-paragraphs", "",
-          "Sort the paragraphs in the region as numbers",
+          "Sort the paragraphs in the region alphabetically",
           do_sort_region, ESii, "*" "p" "v", SF_PARAGRAPH)
 
     CMD2( "list-tags", "",
@@ -2499,27 +3352,71 @@ static const CmdDef extra_commands[] = {
     CMD2( "mark-paragraph", "M-h",
           "Mark the paragraph at or after point",
           do_mark_paragraph, ESi, "p")
-    CMD2( "backward-paragraph", "M-{, C-up",
+    CMD2( "backward-paragraph", "M-{, C-up, C-S-up",
           "Move point to the beginning of the paragraph at or before point",
           do_forward_paragraph, ESi, "q")
-    CMD2( "forward-paragraph", "M-}, C-down",
-          "Move point to the end of the paragraph at or before point",
+    CMD2( "forward-paragraph", "M-}, C-down, C-S-down",
+          "Move point to the end of the paragraph at or after point",
           do_forward_paragraph, ESi, "p")
-    CMD2( "fill-paragraph", "M-q",
+    CMD3( "fill-paragraph", "M-q",
           "Fill the current paragraph, preserving indentation of the first 2 lines",
-          do_fill_paragraph, ES, "*")
-    /* should have fill-region, fill-buffer */
+          do_fill_paragraph, ESii, "*" "v" "p", 0)
+    CMD3( "fill-region", "",
+          "Fill all paragraphs in the current region",
+          do_fill_paragraph, ESii, "*" "v" "p", 1)
+    CMD3( "fill-buffer", "",
+          "Fill all paragraphs in the buffer",
+          do_fill_paragraph, ESii, "*" "v" "p", 2)
+    CMD3( "fill-region-as-paragraph", "",
+          "Fill all paragraphs in the current region as a single paragraph",
+          do_fill_paragraph, ESii, "*" "v" "p", 3)
+    CMD2( "backward-kill-paragraph", "",
+          "Kill back to start of paragraph",
+          do_kill_paragraph, ESi, "*" "q")
     CMD2( "kill-paragraph", "",
-          "Kill the paragraph at or after point",
-          do_kill_paragraph, ESi, "p")
+          "Kill forward to end of paragraph",
+          do_kill_paragraph, ESi, "*" "p")
+    CMD3( "transpose-paragraphs", "",
+          "Interchange the current paragraph with the next one",
+          do_transpose, ESi, "*" "v", CMD_TRANSPOSE_PARAGRAPHS)
+    CMDx( "center-paragraph", "",
+          "Center each nonblank line in the paragraph at or after point",
+          do_center_paragraph, ES, "*")
+
+    CMD2( "backward-kill-sentence", "C-x DEL",
+          "Kill back from point to start of sentence",
+          do_kill_sentence, ESi, "*" "q")
+    CMD2( "backward-sentence", "M-a",
+          "Move backward to start of sentence",
+          do_forward_sentence, ESi, "q")
+    CMD2( "forward-sentence", "M-e",
+          "Move forward to next end of sentence.  With argument, repeat",
+          do_forward_sentence, ESi, "p")
+    CMD2( "kill-sentence", "M-k",
+          "Kill from point to end of sentence",
+          do_kill_sentence, ESi, "*" "p")
+    CMD2( "mark-end-of-sentence", "",
+          "Put mark at end of sentence",
+          do_mark_sentence, ESi, "q")
+    CMDx( "repunctuate-sentences", "",
+          "Put two spaces at the end of sentences from point to the end of buffer",
+          do_repunctuate_sentences, ES, "*")
+    CMD3( "transpose-sentences", "",
+          "Interchange the current sentence with the next one",
+          do_transpose, ESi, "*" "v", CMD_TRANSPOSE_SENTENCES)
 };
 
-static int extras_init(void) {
-    qe_register_commands(NULL, extra_commands, countof(extra_commands));
-    qe_register_completion(&tag_completion);
-    qe_register_completion(&charname_completion);
+static int extras_init(QEmacsState *qs) {
+    qe_register_commands(qs, NULL, extra_commands, countof(extra_commands));
+    qe_register_completion(qs, &tag_completion);
+    qe_register_completion(qs, &charname_completion);
 
     return 0;
 }
 
+static void extras_exit(QEmacsState *qs) {
+    qe_free_equivalents(qs);
+}
+
 qe_module_init(extras_init);
+qe_module_exit(extras_exit);

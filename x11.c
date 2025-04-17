@@ -2,7 +2,7 @@
  * X11 handling for QEmacs
  *
  * Copyright (c) 2000-2003 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -46,6 +46,10 @@
 #include <X11/extensions/Xvlib.h>
 #endif
 
+
+#define _NET_WM_STATE_REMOVE 0L
+#define _NET_WM_STATE_ADD    1L
+
 //#define CONFIG_DOUBLE_BUFFER  1
 
 /* NOTE: XFT code is currently broken */
@@ -58,8 +62,10 @@ static void xv_init(QEditScreen *s);
 static void x11_handle_event(void *opaque);
 
 typedef struct X11State {
+    QEmacsState *qs;
     Display *display;
     int xscreen;
+    Window root;
     Window window;
     Atom wm_delete_window;
     GC gc, gc_pixmap;
@@ -192,7 +198,7 @@ static int x11_dpy_probe(void)
     return 1;
 }
 
-static int x11_dpy_init(QEditScreen *s, int w, int h)
+static int x11_dpy_init(QEditScreen *s, QEmacsState *qs, int w, int h)
 {
     XSizeHints hint;
     int xsize, ysize;
@@ -205,6 +211,11 @@ static int x11_dpy_init(QEditScreen *s, int w, int h)
     XGCValues gc_val;
     X11State *xs = qe_mallocz(X11State);
 
+    if (xs == NULL) {
+        fprintf(stderr, "Cannot allocate X11State.\n");
+        return -1;
+    }
+    s->qs = xs->qs = qs;
     s->priv_data = xs;
     s->media = CSS_MEDIA_SCREEN;
 
@@ -217,6 +228,7 @@ static int x11_dpy_init(QEditScreen *s, int w, int h)
         return -1;
     }
     xs->xscreen = DefaultScreen(xs->display);
+    xs->root = DefaultRootWindow(xs->display);
 
     bg = BlackPixel(xs->display, xs->xscreen);
     fg = WhitePixel(xs->display, xs->xscreen);
@@ -319,6 +331,7 @@ static int x11_dpy_init(QEditScreen *s, int w, int h)
         if (vinfo) {
             xs->visual_depth = vinfo->depth;
         }
+        XFree(vinfo);
     }
 
     xs->xim = XOpenIM(xs->display, NULL, NULL, NULL);
@@ -442,15 +455,31 @@ static void xv_init(QEditScreen *s)
         s->video_format = QEBITMAP_FORMAT_YUV420P;
     }
 }
+
+static void xv_close(QEditScreen *s)
+{
+    X11State *xs = s->priv_data;
+
+    XFree(xs->xv_fo);
+    XvFreeAdaptorInfo(xs->xv_ai);
+}
 #endif
 
 static void x11_dpy_close(QEditScreen *s)
 {
     X11State *xs = s->priv_data;
 
+#ifdef CONFIG_XV
+    xv_close(s);
+#endif
+
 #ifdef CONFIG_DOUBLE_BUFFER
     XFreePixmap(xs->display, xs->dbuffer);
 #endif
+
+    XFreeGC(xs->display, xs->gc_pixmap);
+    XFreeGC(xs->display, xs->gc);
+
     XCloseDisplay(xs->display);
     qe_free(&s->priv_data);
 }
@@ -691,7 +720,6 @@ static void get_entry(char *buf, int buf_size, const char **pp)
 
 static QEFont *x11_dpy_open_font(QEditScreen *s, int style, int size)
 {
-    QEmacsState *qs = &qe_state;
     X11State *xs = s->priv_data;
     char family[128];
     const char *family_list, *p1;
@@ -710,7 +738,7 @@ static QEFont *x11_dpy_open_font(QEditScreen *s, int style, int size)
     font_index = ((style & QE_FONT_FAMILY_MASK) >> QE_FONT_FAMILY_SHIFT) - 1;
     if ((unsigned)font_index >= NB_FONT_FAMILIES)
         font_index = 0; /* fixed font is default */
-    family_list = qs->system_fonts[font_index];
+    family_list = s->qs->system_fonts[font_index];
     if (family_list[0] == '\0')
         family_list = default_x11_fonts[font_index];
 
@@ -1069,27 +1097,38 @@ static void x11_dpy_flush(QEditScreen *s)
 static void x11_dpy_full_screen(QEditScreen *s, int full_screen)
 {
     X11State *xs = s->priv_data;
-    XWindowAttributes attr1;
-    Window win;
+    Atom wm_state;
+    Atom wm_state_fullscreen;
+    XEvent event;
+    XWindowAttributes attribs;
 
-    XGetWindowAttributes(xs->display, xs->window, &attr1);
-    if (full_screen) {
-        if (attr1.width != xs->screen_width || attr1.height != xs->screen_height) {
-            /* store current window position and size */
-            XTranslateCoordinates(xs->display, xs->window, attr1.root, 0, 0,
-                                  &xs->last_window_x, &xs->last_window_y, &win);
-            xs->last_window_width = attr1.width;
-            xs->last_window_height = attr1.height;
-            XMoveResizeWindow(xs->display, xs->window,
-                              0, 0, xs->screen_width, xs->screen_height);
-        }
-    } else {
-        if (xs->last_window_width) {
-            XMoveResizeWindow(xs->display, xs->window,
-                              xs->last_window_x, xs->last_window_y,
-                              xs->last_window_width, xs->last_window_height);
-        }
-    }
+    wm_state = XInternAtom(xs->display, "_NET_WM_STATE", False);
+    wm_state_fullscreen = XInternAtom(xs->display, "_NET_WM_STATE_FULLSCREEN", False);
+
+    memset(&event, 0, sizeof(event));
+    event.type = ClientMessage;
+    event.xclient.window = xs->window;
+    event.xclient.format = 32;
+    event.xclient.message_type = wm_state;
+    event.xclient.data.l[0] = full_screen ? _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE;
+    event.xclient.data.l[1] = wm_state_fullscreen;
+    event.xclient.data.l[2] = 0;
+    event.xclient.data.l[3] = 1;
+    event.xclient.data.l[4] = 0;
+
+    XSendEvent(xs->display, xs->root, False,
+               SubstructureNotifyMask | SubstructureRedirectMask,
+               &event);
+
+    XFlush(xs->display);
+
+    /*
+      last_window_width, last_window_height, last_window_x, last_window_y
+      not need since window manager doing geometric.
+    */
+    XGetWindowAttributes(xs->display, xs->window, &attribs);
+    xs->screen_width = attribs.width;
+    xs->screen_height = attribs.height;
 }
 
 static void x11_dpy_selection_activate(QEditScreen *s)
@@ -1111,7 +1150,6 @@ static Bool test_event(qe__unused__ Display *dpy, XEvent *ev,
 static void x11_dpy_selection_request(QEditScreen *s)
 {
     X11State *xs = s->priv_data;
-    QEmacsState *qs = &qe_state;
     Window w;
     Atom prop;
     Atom utf8;
@@ -1142,7 +1180,7 @@ static void x11_dpy_selection_request(QEditScreen *s)
     prop = xev.xselection.property;
 
     /* copy GUI selection a new yank buffer */
-    b = new_yank_buffer(qs, NULL);
+    b = qe_new_yank_buffer(s->qs, NULL);
     eb_set_charset(b, &charset_utf8, EOL_UNIX);
 
     nread = 0;
@@ -1172,7 +1210,7 @@ static void selection_send(X11State *xs, XSelectionRequestEvent *rq)
 {
     static Atom xa_targets = None;
     static Atom xa_formats[] = { None, None, None, None };
-    QEmacsState *qs = &qe_state;
+    QEmacsState *qs = xs->qs;
     unsigned char *buf;
     XEvent ev;
     EditBuffer *b;
@@ -1306,11 +1344,12 @@ static void qe_expose_add(QEditScreen *s, QExposeRegion *rgn,
 static void qe_expose_flush(QEditScreen *s, QExposeRegion *rgn)
 {
     if (rgn->pending) {
-        QEEvent ev1, *ev = &ev1;
+        QEmacsState *qs = s->qs;
+        QEEvent ev1, *ev = qe_event_clear(&ev1);
 
         /* Ignore expose region */
         ev->expose_event.type = QE_EXPOSE_EVENT;
-        qe_handle_event(ev);
+        qe_handle_event(qs, ev);
         qe_expose_reset(s, rgn);
     }
 }
@@ -1319,12 +1358,13 @@ static void qe_expose_flush(QEditScreen *s, QExposeRegion *rgn)
 static void x11_handle_event(void *opaque)
 {
     QEditScreen *s = opaque;
+    QEmacsState *qs = s->qs;
     X11State *xs = s->priv_data;
     char buf[16];
     XEvent xev;
     KeySym keysym;
-    int shift, ctrl, meta, len, key;
-    QEEvent ev1, *ev = &ev1;
+    int len, key, key_state;
+    QEEvent ev1, *ev = qe_event_clear(&ev1);
     QExposeRegion rgn1, *rgn = &rgn1;
 
     qe_expose_reset(s, rgn);
@@ -1336,21 +1376,21 @@ static void x11_handle_event(void *opaque)
             if ((Atom)xev.xclient.data.l[0] == xs->wm_delete_window) {
                 // cancel pending operation
                 ev->key_event.type = QE_KEY_EVENT;
-                ev->key_event.key = KEY_CTRL('g');
-                qe_handle_event(ev);
+                ev->key_event.key = KEY_QUIT;       // C-g
+                qe_handle_event(qs, ev);
 
-                // simulate C-x C-c
+                // exit qemacs
                 ev->key_event.type = QE_KEY_EVENT;
-                ev->key_event.key = KEY_CTRL('x');
-                qe_handle_event(ev);
-                ev->key_event.type = QE_KEY_EVENT;
-                ev->key_event.key = KEY_CTRL('c');
-                qe_handle_event(ev);
+                ev->key_event.key = KEY_EXIT;       // C-x C-c
+                qe_handle_event(qs, ev);
             }
             break;
         case ConfigureNotify:
             if (x11_term_resize(s, xev.xconfigure.width, xev.xconfigure.height)) {
                 qe_expose_set(s, rgn, 0, 0, s->width, s->height);
+                /* FIXME: fullscreen may be set via window managers,
+                 * record it to qs->is_full_screen the right way.
+                 */
             }
             break;
 
@@ -1372,6 +1412,7 @@ static void x11_handle_event(void *opaque)
                 else
                     ev->button_event.type = QE_BUTTON_RELEASE_EVENT;
 
+                // TODO: set shift state
                 ev->button_event.x = xe->x;
                 ev->button_event.y = xe->y;
                 switch (xe->button) {
@@ -1394,17 +1435,18 @@ static void x11_handle_event(void *opaque)
                     continue;
                 }
                 qe_expose_flush(s, rgn);
-                qe_handle_event(ev);
+                qe_handle_event(qs, ev);
             }
             break;
         case MotionNotify:
             {
                 XMotionEvent *xe = &xev.xmotion;
                 ev->button_event.type = QE_MOTION_EVENT;
+                // TODO: set shift state
                 ev->button_event.x = xe->x;
                 ev->button_event.y = xe->y;
                 qe_expose_flush(s, rgn);
-                qe_handle_event(ev);
+                qe_handle_event(qs, ev);
             }
             break;
             /* selection handling */
@@ -1413,7 +1455,7 @@ static void x11_handle_event(void *opaque)
                 /* ask qemacs to stop visual notification of selection */
                 ev->type = QE_SELECTION_CLEAR_EVENT;
                 qe_expose_flush(s, rgn);
-                qe_handle_event(ev);
+                qe_handle_event(qs, ev);
             }
             break;
         case SelectionRequest:
@@ -1435,127 +1477,84 @@ static void x11_handle_event(void *opaque)
                                     &keysym, &status);
             }
 #endif
-            shift = (xev.xkey.state & ShiftMask);
-            ctrl = (xev.xkey.state & ControlMask);
-            meta = (xev.xkey.state & Mod1Mask);
+            key_state = 0;
+            if (xev.xkey.state & ShiftMask)
+                key_state = KEY_STATE_SHIFT;
+            if (xev.xkey.state & ControlMask)
+                key_state = KEY_STATE_CONTROL;
+            if (xev.xkey.state & Mod1Mask)
+                key_state = KEY_STATE_META;
 #ifdef CONFIG_DARWIN
             /* Also interpret Darwin's Command key as Meta */
-            meta |= (xev.xkey.state & Mod2Mask);
+            if (xev.xkey.state & Mod2Mask)
+                key_state = KEY_STATE_COMMAND;
 #endif
 #if 0
+            // XXX: should use qe_trace_bytes(qs, buf, out->len, EB_TRACE_KEY);
             fprintf(stderr, "keysym=%lx  state=%lx%s%s%s  len=%d  buf[0]='\\x%02x'\n",
-                      (long)keysym, (long)xev.xkey.state,
-                      shift ? " shft" : "",
-                      ctrl ? " ctrl" : "",
-                      meta ? " meta" : "",
-                      len, buf[0]);
+                    (long)keysym, (long)xev.xkey.state,
+                    (key_state & KEY_STATE_SHIFT) ? " shft" : "",
+                    (key_state & KEY_STATE_CONTROL) ? " ctrl" : "",
+                    (key_state & (KEY_STATE_META|KEY_STATE_COMMAND)) ? " meta" : "",
+                    len, buf[0]);
 #endif
-            if (meta) {
-                switch (keysym) {
-                case XK_BackSpace:
-                    key = KEY_META(KEY_DEL);
-                    goto got_key;
-                default:
-                    if (len > 0) {
-                        key = KEY_META(buf[0] & 0xff);
-                        goto got_key;
-                    }
-                    // XXX: should support CTRL/SHIFT/META modifiers
-                    //      on cursor and function keys
-                    if (keysym >= ' ' && keysym <= '~') {
-                        key = KEY_META(' ') + keysym - ' ';
-                        goto got_key;
-                    }
-                    break;
-                }
-            } else
-            if (shift) {
-                switch (keysym) {
-                case XK_ISO_Left_Tab:
-                    key = KEY_SHIFT_TAB;
-                    goto got_key;
-                default:
-                    if (len > 0) {
-                        key = buf[0] & 0xff;
-                        goto got_key;
-                    }
-                    break;
-                }
-            } else
-            if (ctrl) {
-                switch (keysym) {
-                case XK_Right:
-                    key = KEY_CTRL_RIGHT;
-                    goto got_key;
-                case XK_Left:
-                    key = KEY_CTRL_LEFT;
-                    goto got_key;
-                case XK_Home:
-                    key = KEY_CTRL_HOME;
-                    goto got_key;
-                case XK_End:
-                    key = KEY_CTRL_END;
-                    goto got_key;
-                default:
-                    if (len > 0) {
-                        key = buf[0] & 0xff;
-                        goto got_key;
-                    }
-                    break;
-                }
-            } else {
-                switch (keysym) {
-                case XK_F1:     key = KEY_F1;     goto got_key;
-                case XK_F2:     key = KEY_F2;     goto got_key;
-                case XK_F3:     key = KEY_F3;     goto got_key;
-                case XK_F4:     key = KEY_F4;     goto got_key;
-                case XK_F5:     key = KEY_F5;     goto got_key;
-                case XK_F6:     key = KEY_F6;     goto got_key;
-                case XK_F7:     key = KEY_F7;     goto got_key;
-                case XK_F8:     key = KEY_F8;     goto got_key;
-                case XK_F9:     key = KEY_F9;     goto got_key;
-                case XK_F10:    key = KEY_F10;    goto got_key;
-                case XK_F11:    key = KEY_F11;    goto got_key;
-                case XK_F13:    key = KEY_F13;    goto got_key;
-                case XK_F14:    key = KEY_F14;    goto got_key;
-                case XK_F15:    key = KEY_F15;    goto got_key;
-                case XK_F16:    key = KEY_F16;    goto got_key;
-                case XK_F17:    key = KEY_F17;    goto got_key;
-                case XK_F18:    key = KEY_F18;    goto got_key;
-                case XK_F19:    key = KEY_F19;    goto got_key;
-                case XK_F20:    key = KEY_F20;    goto got_key;
-                case XK_Up:     key = KEY_UP;     goto got_key;
-                case XK_Down:   key = KEY_DOWN;   goto got_key;
-                case XK_Right:  key = KEY_RIGHT;  goto got_key;
-                case XK_Left:   key = KEY_LEFT;   goto got_key;
-                case XK_BackSpace: key = KEY_DEL; goto got_key;
-                case XK_Insert: key = KEY_INSERT; goto got_key;
-                case XK_Delete: key = KEY_DELETE; goto got_key;
-                case XK_Home:   key = KEY_HOME;   goto got_key;
-                case XK_End:    key = KEY_END;    goto got_key;
-                case XK_Prior:  key = KEY_PAGEUP; goto got_key;
-                case XK_Next:   key = KEY_PAGEDOWN; goto got_key;
-                case XK_ISO_Left_Tab: key = KEY_SHIFT_TAB; goto got_key;
-                default:
-                    if (len > 0) {
+            key = -1;
+            switch (keysym) {
+            case XK_F1:     key = KEY_F1;     goto got_key;
+            case XK_F2:     key = KEY_F2;     goto got_key;
+            case XK_F3:     key = KEY_F3;     goto got_key;
+            case XK_F4:     key = KEY_F4;     goto got_key;
+            case XK_F5:     key = KEY_F5;     goto got_key;
+            case XK_F6:     key = KEY_F6;     goto got_key;
+            case XK_F7:     key = KEY_F7;     goto got_key;
+            case XK_F8:     key = KEY_F8;     goto got_key;
+            case XK_F9:     key = KEY_F9;     goto got_key;
+            case XK_F10:    key = KEY_F10;    goto got_key;
+            case XK_F11:    key = KEY_F11;    goto got_key;
+            case XK_F13:    key = KEY_F13;    goto got_key;
+            case XK_F14:    key = KEY_F14;    goto got_key;
+            case XK_F15:    key = KEY_F15;    goto got_key;
+            case XK_F16:    key = KEY_F16;    goto got_key;
+            case XK_F17:    key = KEY_F17;    goto got_key;
+            case XK_F18:    key = KEY_F18;    goto got_key;
+            case XK_F19:    key = KEY_F19;    goto got_key;
+            case XK_F20:    key = KEY_F20;    goto got_key;
+            case XK_Up:     key = KEY_UP;     goto got_key;
+            case XK_Down:   key = KEY_DOWN;   goto got_key;
+            case XK_Right:  key = KEY_RIGHT;  goto got_key;
+            case XK_Left:   key = KEY_LEFT;   goto got_key;
+            case XK_BackSpace: key = KEY_DEL; goto got_key;
+            case XK_Insert: key = KEY_INSERT; goto got_key;
+            case XK_Delete: key = KEY_DELETE; goto got_key;
+            case XK_Home:   key = KEY_HOME;   goto got_key;
+            case XK_End:    key = KEY_END;    goto got_key;
+            case XK_Prior:  key = KEY_PAGEUP; goto got_key;
+            case XK_Next:   key = KEY_PAGEDOWN; goto got_key;
+            case XK_ISO_Left_Tab: key = KEY_TAB; goto got_key;
+            default:
+                key_state &= ~KEY_STATE_SHIFT;
+                if (len > 0) {
 #ifdef X_HAVE_UTF8_STRING
-                        {
-                            const char *p = buf;
-                            buf[len] = '\0';
-                            key = utf8_decode(&p);
-                        }
+                    const char *p = buf;
+                    buf[len] = '\0';
+                    key = utf8_decode(&p);
 #else
-                        key = buf[0] & 0xff;
+                    key = buf[0] & 0xff;
 #endif
-                    got_key:
-                        ev->key_event.type = QE_KEY_EVENT;
-                        ev->key_event.key = key;
-                        qe_expose_flush(s, rgn);
-                        qe_handle_event(ev);
-                    }
-                    break;
+                    if (key < 32 || key == 127)
+                        key_state &= ~KEY_STATE_CONTROL;
                 }
+                break;
             }
+            if (key < 0)
+                break;
+        got_key:
+            ev->key_event.type = QE_KEY_EVENT;
+            ev->key_event.shift = key_state;
+            ev->key_event.key = get_modified_key(key, key_state);
+            qe_expose_flush(s, rgn);
+            qe_handle_event(qs, ev);
+            break;
         }
     }
     qe_expose_flush(s, rgn);
@@ -1988,20 +1987,22 @@ static QEDisplay x11_dpy = {
     x11_dpy_draw_picture,
     x11_dpy_full_screen,
     NULL, /* dpy_describe */
+    NULL, /* dpy_sound_bell */
+    NULL, /* dpy_suspend */
+    qe_dpy_error, /* dpy_error */
     NULL, /* next */
 };
 
 static void x11_list_fonts(EditState *s, int argval)
 {
-    QEmacsState *qs = s->qe_state;
-    QEditScreen *screen = qs->screen;
+    QEditScreen *screen = s->qs->screen;
     X11State *xs = screen->priv_data;
     char buf[80];
     EditBuffer *b;
     int i, count;
     char **list;
 
-    b = new_help_buffer();
+    b = new_help_buffer(s);
     if (!b)
         return;
 
@@ -2033,17 +2034,17 @@ static CmdLineOptionDef cmd_options[] = {
                     "set X11 display"),
     CMD_LINE_STRING("g", "geometry", "WxH", &geometry_str,
                     "set X11 display size"),
-    CMD_LINE_INT("fs", "font-size", "ptsize", &font_ptsize,
-                 "set default font size"),
+    CMD_LINE_INT_ARG("fs", "font-size", "ptsize", &font_ptsize,
+                     "set default font size"),
     CMD_LINE_LINK()
 };
 
-static int x11_init(void) {
-    qe_register_cmd_line_options(cmd_options);
-    qe_register_commands(NULL, x11_commands, countof(x11_commands));
+static int x11_init(QEmacsState *qs) {
+    qe_register_cmd_line_options(qs, cmd_options);
+    qe_register_commands(qs, NULL, x11_commands, countof(x11_commands));
     if (force_tty)
         return 0;
-    return qe_register_display(&x11_dpy);
+    return qe_register_display(qs, &x11_dpy);
 }
 
 qe_module_init(x11_init);

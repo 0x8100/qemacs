@@ -2,7 +2,7 @@
  * Buffer editor mode for QEmacs.
  *
  * Copyright (c) 2001-2002 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -38,7 +38,8 @@ static int bufed_sort_order;  // XXX: should be a variable
 
 enum {
     BUFED_HIDE_SYSTEM = 0,
-    BUFED_ALL_VISIBLE = 1,
+    BUFED_SYSTEM_VISIBLE = 1,
+    BUFED_ALL_VISIBLE = 2,
 };
 
 enum {
@@ -82,6 +83,12 @@ static int bufed_sort_func(void *opaque, const void *p1, const void *p2)
     if ((res = (b1->flags & BF_SYSTEM) - (b2->flags & BF_SYSTEM)) != 0)
         return res;
 
+    if ((res = (b1->flags & BF_IS_LOG) - (b2->flags & BF_IS_LOG)) != 0)
+        return res;
+
+    if ((res = (b1->flags & BF_IS_STYLE) - (b2->flags & BF_IS_STYLE)) != 0)
+        return res;
+
     if (sort_mode & BUFED_SORT_MODIFIED) {
         if ((res = (b2->modified - b1->modified)) != 0)
             return res;
@@ -120,16 +127,20 @@ static int bufed_sort_func(void *opaque, const void *p1, const void *p2)
     return (sort_mode & BUFED_SORT_DESCENDING) ? -res : res;
 }
 
-static void build_bufed_list(BufedState *bs, EditState *s)
+static void build_bufed_list(EditState *s, BufedState *bs)
 {
-    QEmacsState *qs = s->qe_state;
+    QEmacsState *qs = s->qs;
     EditBuffer *b, *b1;
     StringItem *item;
     int i, line, topline, col, vpos;
 
     free_strings(&bs->items);
     for (b1 = qs->first_buffer; b1 != NULL; b1 = b1->next) {
-        if (!(b1->flags & BF_SYSTEM) || (bs->flags & BUFED_ALL_VISIBLE)) {
+        if (!(b1->flags & BF_SYSTEM)
+        ||  (bs->flags & BUFED_ALL_VISIBLE)
+        ||  (!(b1->flags & (BF_IS_LOG | BF_IS_STYLE)) &&
+             (bs->flags & BUFED_SYSTEM_VISIBLE)))
+        {
             item = add_string(&bs->items, b1->name, 0);
             item->opaque = b1;
         }
@@ -159,7 +170,7 @@ static void build_bufed_list(BufedState *bs, EditState *s)
         int len, style0;
 
         item = bs->items.items[i];
-        b1 = check_buffer((EditBuffer**)(void *)&item->opaque);
+        b1 = qe_check_buffer(qs, (EditBuffer**)(void *)&item->opaque);
         style0 = (b1->flags & BF_SYSTEM) ? BUFED_STYLE_SYSTEM : 0;
 
         if ((bs->last_index == -1 && b1 == bs->cur_buffer)
@@ -209,9 +220,6 @@ static void build_bufed_list(BufedState *bs, EditState *s)
             } else
             if (b1->default_mode) {
                 mode_name = b1->default_mode->name;
-            } else
-            if (b1->syntax_mode) {
-                mode_name = b1->syntax_mode->name;
             } else {
                 mode_name = "none";
             }
@@ -254,7 +262,7 @@ static void build_bufed_list(BufedState *bs, EditState *s)
     }
 }
 
-static EditBuffer *bufed_get_buffer(BufedState *bs, EditState *s)
+static EditBuffer *bufed_get_buffer(EditState *s, BufedState *bs)
 {
     int index;
 
@@ -262,7 +270,7 @@ static EditBuffer *bufed_get_buffer(BufedState *bs, EditState *s)
     if (index < 0 || index >= bs->items.nb_items)
         return NULL;
 
-    return check_buffer((EditBuffer**)(void *)&bs->items.items[index]->opaque);
+    return qe_check_buffer(s->qs, (EditBuffer**)(void *)&bs->items.items[index]->opaque);
 }
 
 static void bufed_select(EditState *s, int temp)
@@ -276,8 +284,8 @@ static void bufed_select(EditState *s, int temp)
         return;
 
     if (temp < 0) {
-        b = check_buffer(&bs->cur_buffer);
-        last_buffer = check_buffer(&bs->last_buffer);
+        b = qe_check_buffer(s->qs, &bs->cur_buffer);
+        last_buffer = qe_check_buffer(s->qs, &bs->last_buffer);
     } else {
         index = list_get_pos(s);
         if (index < 0 || index >= bs->items.nb_items)
@@ -286,19 +294,25 @@ static void bufed_select(EditState *s, int temp)
         if (temp > 0 && index == bs->last_index)
             return;
 
-        b = check_buffer((EditBuffer**)(void *)&bs->items.items[index]->opaque);
+        b = qe_check_buffer(s->qs, (EditBuffer**)(void *)&bs->items.items[index]->opaque);
         last_buffer = bs->cur_buffer;
     }
-    e = check_window(&bs->cur_window);
+    e = qe_check_window(s->qs, &bs->cur_window);
     if (e && b) {
         switch_to_buffer(e, b);
         e->last_buffer = last_buffer;
+    } else {
+        if (e == NULL) {
+            switch_to_buffer(s, b);
+        }
     }
     if (temp <= 0) {
-        /* delete bufed window */
-        do_delete_window(s, 1);
-        if (e)
-            e->qe_state->active_window = e;
+        if (s->flags & WF_POPUP) {
+            /* delete bufed window */
+            do_delete_window(s, 1);
+            if (e)
+                e->qs->active_window = e;
+        }
     } else {
         bs->last_index = index;
         do_refresh_complete(s);
@@ -336,7 +350,7 @@ static void bufed_kill_item(void *opaque, StringItem *item, int index)
 {
     BufedState *bs;
     EditState *s = opaque;
-    EditBuffer *b = check_buffer((EditBuffer**)(void *)&item->opaque);
+    EditBuffer *b = qe_check_buffer(s->qs, (EditBuffer**)(void *)&item->opaque);
 
     if (!(bs = bufed_get_state(s, 1)))
         return;
@@ -362,12 +376,13 @@ static void bufed_kill_buffer(EditState *s)
     string_selection_iterate(&bs->items, list_get_pos(s),
                              bufed_kill_item, s);
     bufed_select(s, 1);
-    build_bufed_list(bs, s);
+    build_bufed_list(s, bs);
 }
 
 /* show a list of buffers */
 static void do_buffer_list(EditState *s, int argval)
 {
+    QEmacsState *qs = s->qs;
     BufedState *bs;
     EditBuffer *b;
     EditState *e;
@@ -380,10 +395,10 @@ static void do_buffer_list(EditState *s, int argval)
     if (s->flags & WF_POPLEFT) {
         /* avoid messing with the dired pane */
         s = find_window(s, KEY_RIGHT, s);
-        s->qe_state->active_window = s;
+        qs->active_window = s;
     }
 
-    b = eb_scratch("*bufed*", BF_SYSTEM | BF_UTF8 | BF_STYLE1);
+    b = qe_new_buffer(qs, "*bufed*", BC_REUSE | BC_CLEAR | BF_SYSTEM | BF_UTF8 | BF_STYLE1);
     if (!b)
         return;
 
@@ -401,13 +416,12 @@ static void do_buffer_list(EditState *s, int argval)
     bs->cur_window = s;
     bs->cur_buffer = s->b;
     bs->last_buffer = s->last_buffer;
-
-    if (argval == NO_ARG) {
-        bs->flags &= ~BUFED_ALL_VISIBLE;
-    } else {
-        bs->flags |= BUFED_ALL_VISIBLE;
+    if (argval > 0) {
+        bs->flags |= BUFED_SYSTEM_VISIBLE;
+        if (argval > 4)
+            bs->flags |= BUFED_ALL_VISIBLE;
     }
-    build_bufed_list(bs, e);
+    build_bufed_list(e, bs);
 
     /* if active buffer is found, go directly on it */
     for (i = 0; i < bs->items.nb_items; i++) {
@@ -426,12 +440,12 @@ static void bufed_clear_modified(EditState *s)
     if (!(bs = bufed_get_state(s, 1)))
         return;
 
-    b = bufed_get_buffer(bs, s);
+    b = bufed_get_buffer(s, bs);
     if (!b)
         return;
 
     b->modified = 0;
-    build_bufed_list(bs, s);
+    build_bufed_list(s, bs);
 }
 
 static void bufed_toggle_read_only(EditState *s)
@@ -442,12 +456,12 @@ static void bufed_toggle_read_only(EditState *s)
     if (!(bs = bufed_get_state(s, 1)))
         return;
 
-    b = bufed_get_buffer(bs, s);
+    b = bufed_get_buffer(s, bs);
     if (!b)
         return;
 
     b->flags ^= BF_READONLY;
-    build_bufed_list(bs, s);
+    build_bufed_list(s, bs);
 }
 
 static void bufed_refresh(EditState *s, int toggle)
@@ -457,10 +471,17 @@ static void bufed_refresh(EditState *s, int toggle)
     if (!(bs = bufed_get_state(s, 1)))
         return;
 
-    if (toggle)
-        bs->flags ^= BUFED_ALL_VISIBLE;
+    if (toggle) {
+        if (bs->flags & BUFED_ALL_VISIBLE)
+            bs->flags &= ~(BUFED_SYSTEM_VISIBLE | BUFED_ALL_VISIBLE);
+        else
+        if (bs->flags & BUFED_SYSTEM_VISIBLE)
+            bs->flags |= BUFED_ALL_VISIBLE;
+        else
+            bs->flags |= BUFED_SYSTEM_VISIBLE;
+    }
 
-    build_bufed_list(bs, s);
+    build_bufed_list(s, bs);
 }
 
 static void bufed_set_sort(EditState *s, int order)
@@ -476,7 +497,7 @@ static void bufed_set_sort(EditState *s, int order)
         bufed_sort_order = order;
 
     bs->last_index = -1;
-    build_bufed_list(bs, s);
+    build_bufed_list(s, bs);
 }
 
 static void bufed_display_hook(EditState *s)
@@ -542,21 +563,24 @@ static const CmdDef bufed_commands[] = {
     CMD1( "bufed-unsorted", "u",
           "Sort the buffer list by creation time",
           bufed_set_sort, 0)
-    CMD1( "bufed-sort-name", "b, B",
+    CMD1( "bufed-sort-name", "b",
           "Sort the buffer list by buffer name",
           bufed_set_sort, BUFED_SORT_NAME)
-    CMD1( "bufed-sort-filename", "f, F",
+    CMD1( "bufed-sort-filename", "f",
           "Sort the buffer list by buffer file name",
           bufed_set_sort, BUFED_SORT_FILENAME)
-    CMD1( "bufed-sort-size", "z, Z",
+    CMD1( "bufed-sort-size", "z",
           "Sort the buffer list by buffer size",
           bufed_set_sort, BUFED_SORT_SIZE)
-    CMD1( "bufed-sort-time", "t, T",
+    CMD1( "bufed-sort-time", "t",
           "Sort the buffer list by buffer modification time",
           bufed_set_sort, BUFED_SORT_TIME)
-    CMD1( "bufed-sort-modified", "m, M",
+    CMD1( "bufed-sort-modified", "m",
           "Sort the buffer list with modified buffers first",
           bufed_set_sort, BUFED_SORT_MODIFIED)
+    CMD2( "bufed-summary", "?",
+          "Display a summary of bufed commands",
+          do_apropos, ESs, "@{bufed}")
 };
 
 static const CmdDef bufed_global_commands[] = {
@@ -572,7 +596,7 @@ static const char * const bufed_bindings[] = {
     NULL
 };
 
-static int bufed_init(void)
+static int bufed_init(QEmacsState *qs)
 {
     /* inherit from list mode */
     /* CG: assuming list_mode already initialized ? */
@@ -586,9 +610,9 @@ static int bufed_init(void)
     bufed_mode.display_hook = bufed_display_hook;
     bufed_mode.bindings = bufed_bindings;
 
-    qe_register_mode(&bufed_mode, MODEF_VIEW);
-    qe_register_commands(&bufed_mode, bufed_commands, countof(bufed_commands));
-    qe_register_commands(NULL, bufed_global_commands, countof(bufed_global_commands));
+    qe_register_mode(qs, &bufed_mode, MODEF_VIEW);
+    qe_register_commands(qs, &bufed_mode, bufed_commands, countof(bufed_commands));
+    qe_register_commands(qs, NULL, bufed_global_commands, countof(bufed_global_commands));
 
     return 0;
 }

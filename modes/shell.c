@@ -52,6 +52,7 @@ enum QETermState {
     QE_TERM_STATE_ESC,
     QE_TERM_STATE_ESC2,
     QE_TERM_STATE_CSI,
+    QE_TERM_STATE_OSC1,
     QE_TERM_STATE_STRING,
 };
 
@@ -70,6 +71,7 @@ typedef struct ShellState {
     int cur_prompt; /* offset of end of prompt on current line */
     int save_x, save_y;
     int nb_params;
+#define CSI_PARAM_OMITTED  0x80000000
     int params[MAX_CSI_PARAMS + 1];
     int state;
     int esc1, esc2;
@@ -82,7 +84,6 @@ typedef struct ShellState {
     int utf8_len;
     EditBuffer *b;
     EditBuffer *b_color; /* color buffer, one byte per char */
-    struct QEmacsState *qe_state;
     const char *ka1, *ka3, *kb2, *kc1, *kc3, *kcbt, *kspd;
     const char *kbeg, *kbs, *kent, *kdch1, *kich1;
     const char *kcub1, *kcud1, *kcuf1, *kcuu1;
@@ -190,7 +191,8 @@ const char *get_shell(void)
 #define QE_TERM_YSIZE  25
 #define QE_TERM_YSIZE_INFINITE  10000
 
-static int run_process(const char *cmd, int *fd_ptr, int *pid_ptr,
+static int run_process(ShellState *s,
+                       const char *cmd, int *fd_ptr, int *pid_ptr,
                        int cols, int rows, const char *path,
                        int shell_flags)
 {
@@ -202,8 +204,8 @@ static int run_process(const char *cmd, int *fd_ptr, int *pid_ptr,
 
     pty_fd = get_pty(tty_name, sizeof(tty_name));
     if (pty_fd < 0) {
-        put_status(NULL, "run_process: cannot get tty: %s",
-                   strerror(errno));
+        put_error(s->b->qs->active_window, "run_process: cannot get tty: %s",
+                  strerror(errno));
         return -1;
     }
     fcntl(pty_fd, F_SETFL, O_NONBLOCK);
@@ -217,7 +219,7 @@ static int run_process(const char *cmd, int *fd_ptr, int *pid_ptr,
 
     pid = fork();
     if (pid < 0) {
-        put_status(NULL, "run_process: cannot fork");
+        put_error(s->b->qs->active_window, "run_process: cannot fork");
         return -1;
     }
     if (pid == 0) {
@@ -279,6 +281,8 @@ static int run_process(const char *cmd, int *fd_ptr, int *pid_ptr,
         setenv("LINES", lines_string, 1);
         setenv("COLUMNS", columns_string, 1);
         setenv("TERM", "xterm-256color", 1);
+        setenv("TERM_PROGRAM", "qemacs", 1);
+        setenv("TERM_PROGRAM_VERSION", str_version, 1);
         unsetenv("PAGER");
         vp = getenv("QELEVEL");
         snprintf(qelevel, sizeof qelevel, "%d", 1 + (vp ? atoi(vp) : 0));
@@ -302,18 +306,19 @@ static int run_process(const char *cmd, int *fd_ptr, int *pid_ptr,
 /* VT100 emulation */
 
 static void qe_trace_term(ShellState *s, const char *msg) {
-    eb_trace_bytes(msg, -1, EB_TRACE_FLUSH | EB_TRACE_EMULATE);
-    eb_trace_bytes(": ", -1, EB_TRACE_EMULATE);
-    eb_trace_bytes(s->term_buf, s->term_len, EB_TRACE_EMULATE);
+    QEmacsState *qs = s->base.qs;
+    qe_trace_bytes(qs, msg, -1, EB_TRACE_FLUSH | EB_TRACE_EMULATE);
+    qe_trace_bytes(qs, ": ", -1, EB_TRACE_EMULATE);
+    qe_trace_bytes(qs, s->term_buf, s->term_len, EB_TRACE_EMULATE);
 }
 
 #define TRACE_MSG(s, m)  qe_trace_term(s, m)
 #define TRACE_PRINTF(s, ...)  do { \
-    if (s->qe_state->trace_buffer) { \
-        if (s->qe_state->trace_buffer_state) \
-            eb_putc(s->qe_state->trace_buffer, '\n'); \
-        eb_printf(s->qe_state->trace_buffer, __VA_ARGS__); \
-        s->qe_state->trace_buffer_state = 0; \
+    if (s->base.qs->trace_buffer) { \
+        if (s->base.qs->trace_buffer_state) \
+            eb_putc(s->base.qs->trace_buffer, '\n'); \
+        eb_printf(s->base.qs->trace_buffer, __VA_ARGS__); \
+        s->base.qs->trace_buffer_state = 0; \
     } \
 } while(0)
 
@@ -480,8 +485,8 @@ static void qe_term_write(ShellState *s, const char *buf, int len)
     if (len < 0)
         len = strlen(buf);
 
-    if (s->qe_state->trace_buffer)
-        eb_trace_bytes(buf, len, EB_TRACE_PTY);
+    if (s->base.qs->trace_buffer)
+        qe_trace_bytes(s->base.qs, buf, len, EB_TRACE_PTY);
 
     while (len > 0) {
         ret = write(s->pty_fd, buf, len);
@@ -1068,7 +1073,7 @@ static int qe_term_csi_m(ShellState *s, const int *params, int count)
      * The 39 and 49 attributes are likely to be unimplemented.
      */
     switch (c) {
-    case -1:
+    case CSI_PARAM_OMITTED:
     case 0:     /* Normal (default). [exit_attribute_mode] */
         s->fgcolor = QE_TERM_DEF_FG;
         s->bgcolor = QE_TERM_DEF_BG;
@@ -1130,6 +1135,7 @@ static int qe_term_csi_m(ShellState *s, const int *params, int count)
         /* set foreground color */
         /* 0:black 1:red 2:green 3:yellow 4:blue 5:magenta 6:cyan 7:white */
         /* XXX: should distinguish system colors and palette colors */
+        // FIXME: should map the color if it has been redefined only?
         s->fgcolor = MAP_FG_COLOR(c - 30);
         break;
     case 38:    /* set extended foreground color (ISO-8613-3) */
@@ -1163,12 +1169,14 @@ static int qe_term_csi_m(ShellState *s, const int *params, int count)
             int color = clamp_int(params[2], 0, 255);
 
             /* map color to qe-term palette */
+            // FIXME: should map the color if it has been redefined only?
             s->fgcolor = MAP_FG_COLOR(color);
             return 3;
         }
         if (count >= 5 && params[1] == 2) {
             /* set foreground color to 24-bit color */
             /* complete syntax is \033[38;2;r;g;bm where r,g,b are in 0..255 */
+            /* ??? alternate syntax: ESC [ 3 8 : 2 : Pi : Pr : Pg : Pb m */
             QEColor rgb = QERGB25(clamp_int(params[2], 0, 255),
                                   clamp_int(params[3], 0, 255),
                                   clamp_int(params[4], 0, 255));
@@ -1185,6 +1193,7 @@ static int qe_term_csi_m(ShellState *s, const int *params, int count)
     case 44: case 45: case 46: case 47:
         /* set background color */
         /* XXX: should distinguish system colors and palette colors */
+        // FIXME: should map the color if it has been redefined only?
         s->bgcolor = MAP_BG_COLOR(c - 40);
         break;
     case 48:    /* set extended background color (ISO-8613-3) */
@@ -1194,6 +1203,7 @@ static int qe_term_csi_m(ShellState *s, const int *params, int count)
             int color = clamp_int(params[2], 0, 255);
 
             /* map color to qe-term palette */
+            // FIXME: should map the color if it has been redefined only?
             s->bgcolor = MAP_BG_COLOR(color);
             return 3;
         }
@@ -1236,12 +1246,14 @@ static int qe_term_csi_m(ShellState *s, const int *params, int count)
     case 94: case 95: case 96: case 97:
         /* Set foreground text color, high intensity, aixterm (not in standard) */
         /* XXX: should distinguish system colors and palette colors */
+        // FIXME: should map the color if it has been redefined only?
         s->fgcolor = MAP_FG_COLOR(c - 90 + 8);
         break;
     case 100: case 101: case 102: case 103:
     case 104: case 105: case 106: case 107:
         /* Set background color, high intensity, aixterm (not in standard) */
         /* XXX: should distinguish system colors and palette colors */
+        // FIXME: should map the color if it has been redefined only?
         s->bgcolor = MAP_BG_COLOR(c - 100 + 8);
         break;
     default:
@@ -1257,7 +1269,7 @@ static int qe_term_csi_m(ShellState *s, const int *params, int count)
 static void qe_term_update_cursor(qe__unused__ ShellState *s)
 {
 #if 0
-    QEmacsState *qs = s->qe_state;
+    QEmacsState *qs = s->base.qs;
     EditState *e;
 
     if (s->cur_offset == -1)
@@ -1301,8 +1313,8 @@ static void shell_key(void *opaque, int key)
         return;
 
     if (key == KEY_CTRL('o')) {
-        qe_ungrab_keys();
-        unget_key(key);
+        qe_ungrab_keys(s->base.qs);
+        qe_unget_key(s->base.qs, key);
         return;
     }
     p = buf;
@@ -1312,14 +1324,6 @@ static void shell_key(void *opaque, int key)
     case KEY_DOWN:      p = s->kcud1; break;
     case KEY_RIGHT:     p = s->kcuf1; break;
     case KEY_LEFT:      p = s->kcub1; break;
-    //case KEY_CTRL_UP:
-    //case KEY_CTRL_DOWN:
-    //case KEY_CTRL_RIGHT:
-    //case KEY_CTRL_LEFT:
-    //case KEY_CTRL_END:
-    //case KEY_CTRL_HOME:
-    //case KEY_CTRL_PAGEUP:
-    //case KEY_CTRL_PAGEDOWN:
     case KEY_SHIFT_TAB: p = s->kcbt;  break;
     case KEY_HOME:      p = s->khome; break;
     case KEY_INSERT:    p = s->kich1; break;
@@ -1413,7 +1417,7 @@ static void qe_term_emulate(ShellState *s, int c)
             break;
         case 7:     /* BEL  Bell (Ctrl-G). */
             // XXX: should check for visible-bell
-            put_status(NULL, "Ding!");
+            put_status(s->b->qs->active_window, "Ding!");
             break;
         case 8:     /* BS   Backspace (Ctrl-H). */
             //TRACE_PRINTF(s, "BS: ");
@@ -1575,11 +1579,11 @@ static void qe_term_emulate(ShellState *s, int c)
         s->esc1 = c;
         s->state = QE_TERM_STATE_NORM;
         switch (c) {
-        case '[':   // Control Sequence Introducer (CSI  is 0x9b).
+        case '[':   // Control Sequence Introducer (CSI is 0x9b).
             s->nb_params = 0;
-            s->params[0] = -1;
-            s->params[1] = -1;
-            s->esc1 = 0;
+            s->params[0] = CSI_PARAM_OMITTED;
+            s->params[1] = CSI_PARAM_OMITTED;
+            s->esc1 = 0;   /* used for both leader and intermediary bytes */
             s->state = QE_TERM_STATE_CSI;
             break;
         case ' ':
@@ -1592,16 +1596,22 @@ static void qe_term_emulate(ShellState *s, int c)
         case '-':
         case '.':
         case '/':
-        case ']':   // Operating System Command (OSC  is 0x9d).
             s->state = QE_TERM_STATE_ESC2;
             break;
+        case ']':   // Operating System Command (OSC is 0x9d).
+            s->params[0] = 0;
+            s->esc2 = 0;
+            s->state = QE_TERM_STATE_OSC1;
+            break;
         case '^':   // Privacy Message (PM  is 0x9e).
-        case '_':   // Application Program Command (APC  is 0x9f).
-        case 'P':   // Device Control String (DCS  is 0x90).
+        case '_':   // Application Program Command (APC is 0x9f).
+        case 'P':   // Device Control String (DCS is 0x90).
+            s->params[0] = 0;
+            s->esc2 = 0;
             s->state = QE_TERM_STATE_STRING;
             break;
         case '\\':  // String Terminator (ST  is 0x9c).
-            TRACE_MSG(s, "unhandled string");
+            TRACE_MSG(s, "stray ST");
             break;
         case '6':   // Back Index (DECBI), VT420 and up.
             break;
@@ -1708,15 +1718,73 @@ static void qe_term_emulate(ShellState *s, int c)
         case ESC2('/','B'):
             TRACE_MSG(s, "set charset");
             break;
-            /* XXX: OSC sequences should parse as OSC Ps;Pt ST */
-        case ESC2(']','0'):  /* Change Icon Name and Window Title to Pt. */
-        case ESC2(']','1'):  /* Change Icon Name to Pt. */
-        case ESC2(']','2'):  /* Change Window Title to Pt. */
-        case ESC2(']','3'):  /* Set X property on top-level window */
-            /* Pt should be in the form "prop=value", or just "prop" to delete the property */
-        case ESC2(']','4'):  /* xterm's define-extended color "\033]4;c;name\007" */
-            /* Change Color #c to cname. Any number of c name pairs may be given. */
-            /* iTerm2 has a specific behavior for colors 16 to 22:
+        default:
+            TRACE_MSG(s, "unhandled");
+            break;
+        }
+        s->shifted = s->charset[s->cset];
+        break;
+    case QE_TERM_STATE_OSC1:
+            /* XXX: OSC sequences should use QE_TERM_STATE_STRING
+               (eg: OSC Ps;Pt ST) but linux tty uses non standard
+               sequences ESC ] R and `ESC ] P prrggbb, so we need
+               these extra states to avoid hanging the terminal
+             */
+        if (s->term_pos == 3) {
+            s->esc2 = c;
+            if (c == 'R') {      /* linux reset palette */
+                s->state = QE_TERM_STATE_NORM;
+                break;
+            }
+        }
+        if (s->esc2 == 'P') {
+            if (s->term_pos < 10)
+                break;
+            /* linux set palette syntax is OSC P nrrggbb:
+               n: letter 0-f for standard palette entries
+                         g-m for extended attributes:
+               rr, gg, bb 2 hex digit values
+             */
+            TRACE_MSG(s, "linux palette");
+            s->state = QE_TERM_STATE_NORM;
+            break;
+        }
+        if (c >= '0' && c <= '9') {
+            s->params[0] *= 10;
+            s->params[0] += c - '0';
+            break;
+        }
+        s->state = QE_TERM_STATE_STRING;
+        /* fall thru */
+    case QE_TERM_STATE_STRING:
+        /* CG: should store the string */
+        /* Stop string on CR or LF, for protection */
+        if ((c == '\012' || c == '\015') && s->params[0] != 1337) {
+            s->state = QE_TERM_STATE_NORM;
+            TRACE_MSG(s, "broken string");
+            break;
+        }
+        /* Stop string on \a (^G) or ST (ESC \) */
+        if (!(c == '\007' || c == 0234 || (s->lastc == 27 && c == '\\'))) {
+            /* XXX: should store the string for specific cases */
+            s->lastc = c;
+            break;
+        }
+        s->state = QE_TERM_STATE_NORM;
+        /* OSC / PM / APC / DCS string has been received. Should handle these cases:
+           - OSC 0; Pt ST  Change Icon Name and Window Title to Pt.
+           - OSC 1; Pt ST  Change Icon Name to Pt.
+           - OSC 2; Pt ST  Change Window Title to Pt.
+           - OSC 3; Pt ST  Set X property on top-level window: Pt should
+           be in the form "prop=value", or just "prop" to delete the property
+           - OSC 4; c; name... ST  xterm's define extended color (executeXtermSetRgb)
+           Change Color #c to name. Any number of c / name pairs may be given.
+           example: "\033]4;16;rgb:0000/00000/0000\033\134"
+
+           iTerm2 reports the current rgb value with "<index>;?",
+           e.g. "\033]4;105;?" -> report as \033]4;105;rgb:0000/cccc/ffff\007"
+
+           iTerm2 has a specific behavior for colors 16 to 22:
                 16: terminalSetForegroundColor
                 17: terminalSetBackgroundColor
                 18: terminalSetBoldColor
@@ -1724,82 +1792,55 @@ static void qe_term_emulate(ShellState *s, int c)
                 20: terminalSetSelectedTextColor
                 21: terminalSetCursorColor
                 22: terminalSetCursorTextColor
-            */
-            /* xterm has the following set extended attribute: */
-            /* 10    Change color names starting with text foreground to Pt
-                     (a list of one or more color names or RGB specifications,
-                     separated by semicolon, up to eight, as per XParseColor).
-            */
-            /* 11    Change colors starting with text background to Pt */
-            /* 12    Change colors starting with text cursor to Pt */
-            /* 13    Change colors starting with mouse foreground to Pt */
-            /* 14    Change colors starting with mouse background to Pt */
-            /* 15    Change colors starting with Tek foreground to Pt */
-            /* 16    Change colors starting with Tek background to Pt */
-            /* 17    Change colors starting with highlight to Pt */
-            /* 46    Change Log File to Pt (normally disabled by a compile-time option) */
-            /* 50    Set Font to Pt If Pt begins with a "#", index in the font
-                     menu, relative (if the next character is a plus or minus
-                     sign) or absolute. A number is expected but not required
-                     after the sign (the default is the current entry for
-                     relative, zero for absolute indexing).
-            */
-        case ESC2(']','W'):     /* word-set (define char wordness) */
-            s->state = QE_TERM_STATE_STRING;
-            break;
-        case ESC2(']','P'):     /* linux set palette */
-        case ESC2(']','R'):     /* linux reset palette */
-            /* XXX: Todo */
-            TRACE_MSG(s, "linux palette");
-            /* followed by 7 digit palette entry nrrggbb with
-               n: letter 0-f for standard palette entries
-                         g-m for extended attributes:
-               rr, gg, bb 2 hex digit values
-            */
-            break;
-        default:
-            TRACE_MSG(s, "unhandled");
-            break;
-        }
-        s->shifted = s->charset[s->cset];
-        break;
-    case QE_TERM_STATE_STRING:
-        /* CG: should store the string */
-        /* Stop string on CR or LF, for protection */
-        if (c == '\012' || c == '\015') {
-            s->state = QE_TERM_STATE_NORM;
-            TRACE_MSG(s, "broken string");
-            break;
-        }
-        /* Stop string on \a (^G) or M-\ -- need better test for ESC \ */
-        if (c == '\007' || c == 0234 || c == '\\') {
-            /* CG: ESC2(']','0') should set shell caption */
-            /* CG: ESC2(']','4') should parse color definition string */
-            /* (example: "\033]4;16;rgb:00/00/00\033\134" ) */
-            // executeXtermSetRgb
-            // iTerm2 reports the current rgb value with "<index>;?",
-            //   e.g. "105;?" -> report as \033]4;P;rgb:00/cc/ff\007",
-            s->state = QE_TERM_STATE_NORM;
-            TRACE_MSG(s, "unhandled string");
-        }
+
+           xterm has the following set extended attribute:
+           - OSC 10; c; name... ST    Change color names starting with
+           text foreground (a list of one or more color names or RGB
+           specifications, separated by semicolon, up to eight, name as
+           as per XParseColor.
+
+           - OSC 11; c; name... ST  Change colors starting with text background
+           - OSC 12; c; name... ST  Change colors starting with text cursor
+           - OSC 13; c; name... ST  Change colors starting with mouse foreground
+           - OSC 14; c; name... ST  Change colors starting with mouse background
+           - OSC 15; c; name... ST  Change colors starting with Tek foreground
+           - OSC 16; c; name... ST  Change colors starting with Tek background
+           - OSC 17; c; name... ST  Change colors starting with highlight
+           - OSC 46; Pt ST  Change Log File to Pt (normally disabled by a
+           compile-time option)
+           - OSC 50; Pt ST  Set Font to Pt. If Pt begins with a "#", index in
+           the font menu, relative (if the next character is a plus or minus
+           sign) or absolute. A number is expected but not required after the
+           sign (the default is the current entry for relative, zero for
+           absolute indexing).
+           - OSC W; Pt ST   word-set (define char wordness)
+           xterm has a file download and image display protocol:
+           - OSC 1337; Pt ST
+         */
+        TRACE_PRINTF(s, "unhandled string: %.*s", min_int(s->term_pos, 20), s->term_buf);
         break;
     case QE_TERM_STATE_CSI:
-        if (c == '?' || c == '=' || c == '"' || c == ' ' || c == '\'' || c == '&') {
+        if (c >= '<' && c <= '?') {
+            /* leader bytes */
             s->esc1 = c;
             break;
         }
+        if (c >= 0x20 && c <= 0x2F) {
+            /* intermediary bytes */
+            s->esc1 = c;    /* no need to distinguish leader and interm bytes */
+            break;
+        }
         if (qe_isdigit(c)) {
-            if (s->params[s->nb_params] < 0) {
-                s->params[s->nb_params] = 0;
-            }
+            s->params[s->nb_params] &= ~CSI_PARAM_OMITTED;
             s->params[s->nb_params] *= 10;
             s->params[s->nb_params] += c - '0';
             break;
         }
+        /* XXX: should clarify */
         if (s->nb_params == 0
         ||  (s->nb_params < MAX_CSI_PARAMS && s->params[s->nb_params] >= 0)) {
             s->nb_params++;
-            s->params[s->nb_params] = -1;
+            s->params[s->nb_params] = CSI_PARAM_OMITTED;
         }
         if (c == ';' || c == ':')
             break;
@@ -1807,6 +1848,7 @@ static void qe_term_emulate(ShellState *s, int c)
         /* default param is 1 for most commands */
         param1 = s->params[0] >= 0 ? s->params[0] : 1;
         param2 = s->params[1] >= 0 ? s->params[1] : 1;
+        // FIXME: should handle c < 0x20 and c >= 0x7F according to ECMA-48 */
         switch (ESC2(s->esc1,c)) {
         case '@':  /* ICH: Insert Ps (Blank) Character(s) (default = 1) */
             {
@@ -2121,7 +2163,7 @@ static void qe_term_emulate(ShellState *s, int c)
                     if (s->shell_flags & SF_INTERACTIVE) {
                         /* only grab keys in interactive qe_term buffers */
                         s->grab_keys = 1;
-                        qe_grab_keys(shell_key, s);
+                        qe_grab_keys(s->base.qs, shell_key, s);
                         /* Should also clear screen */
                     }
                     if (!s->use_alternate_screen) {
@@ -2206,7 +2248,7 @@ static void qe_term_emulate(ShellState *s, int c)
                 case 1049:  /* Use Normal Screen Buffer and restore cursor
                        as in DECRC. */
                     if (s->shell_flags & SF_INTERACTIVE) {
-                        qe_ungrab_keys();
+                        qe_ungrab_keys(s->base.qs);
                         s->grab_keys = 0;
                     }
                     if (s->use_alternate_screen) {
@@ -2342,9 +2384,9 @@ static void shell_read_cb(void *opaque)
         return;
 
     b = s->b;
-    qs = s->qe_state;
+    qs = s->base.qs;
     if (qs->trace_buffer)
-        eb_trace_bytes(buf, len, EB_TRACE_SHELL);
+        qe_trace_bytes(qs, buf, len, EB_TRACE_SHELL);
 
     /* Suspend BF_READONLY flag to allow shell output to readonly buffer */
     save_readonly = b->flags & BF_READONLY;
@@ -2396,8 +2438,7 @@ static void shell_read_cb(void *opaque)
     }
 
     /* now we do some refresh (should just invalidate?) */
-    edit_display(qs);
-    dpy_flush(qs->screen);
+    qe_display(qs);
 }
 
 static void shell_mode_free(EditBuffer *b, void *state)
@@ -2455,7 +2496,7 @@ static void shell_pid_cb(void *opaque, int status)
         return;
 
     b = s->b;
-    qs = s->qe_state;
+    qs = s->base.qs;
 
     *buf = '\0';
     if (s->caption) {
@@ -2500,7 +2541,7 @@ static void shell_pid_cb(void *opaque, int status)
 
     /* remove shell input mode */
     s->grab_keys = 0;
-    qe_ungrab_keys();
+    qe_ungrab_keys(qs);
     for (e = qs->first_window; e != NULL; e = e->next_window) {
         if (e->b == b) {
             e->interactive = 0;
@@ -2515,32 +2556,40 @@ static void shell_pid_cb(void *opaque, int status)
         //shell_mode_free(b, s);  // called by qe_free_mode_data
         qe_free_mode_data(&s->base);
     }
-    edit_display(qs);
-    dpy_flush(qs->screen);
+    qe_display(qs);
 }
 
-EditBuffer *new_shell_buffer(EditBuffer *b0, EditState *e,
-                             const char *bufname, const char *caption,
-                             const char *path,
-                             const char *cmd, int shell_flags)
+EditBuffer *qe_new_shell_buffer(QEmacsState *qs, EditBuffer *b0, EditState *e,
+                                const char *bufname, const char *caption,
+                                const char *path, const char *cmd,
+                                int shell_flags)
 {
-    QEmacsState *qs = &qe_state;
     ShellState *s;
     EditBuffer *b;
     const char *lang;
     int cols, rows;
 
+    if (!b0 && (shell_flags & SF_REUSE_BUFFER)) {
+        b0 = qe_find_buffer_name(qs, bufname);
+        if (b0) {
+            if (shell_flags & SF_ERASE_BUFFER) {
+                /* XXX: this also clears the undo records */
+                eb_clear(b0);
+            }
+        }
+    }
+
     b = b0;
     if (!b) {
-        b = eb_new(bufname, BF_SAVELOG | BF_SHELL);
+        b = qe_new_buffer(qs, bufname, BF_SAVELOG | BF_SHELL);
         if (!b)
             return NULL;
     }
+    shell_flags &= ~(SF_REUSE_BUFFER | SF_ERASE_BUFFER);
 
     eb_set_buffer_name(b, bufname); /* ensure that the name is unique */
     if (shell_flags & SF_COLOR) {
-        eb_create_style_buffer(b, QE_TERM_STYLE_BITS <= 16 ? BF_STYLE2 :
-                               QE_TERM_STYLE_BITS <= 32 ? BF_STYLE4 : BF_STYLE8);
+        eb_create_style_buffer(b, BF_STYLE_COMP);
     }
     /* Select shell output buffer encoding from LANG setting */
     if (((lang = getenv("LANG")) != NULL && strstr(lang, "UTF-8")) ||
@@ -2567,7 +2616,6 @@ EditBuffer *new_shell_buffer(EditBuffer *b0, EditState *e,
     s->b = b;
     s->pty_fd = -1;
     s->pid = -1;
-    s->qe_state = qs;
     s->caption = caption;
     s->shell_flags = shell_flags;
     s->cur_prompt = s->cur_offset = b->total_size;
@@ -2584,7 +2632,7 @@ EditBuffer *new_shell_buffer(EditBuffer *b0, EditState *e,
     s->cols = cols;
     s->rows = rows;
 
-    if (run_process(cmd, &s->pty_fd, &s->pid, cols, rows, path, shell_flags) < 0) {
+    if (run_process(s, cmd, &s->pty_fd, &s->pid, cols, rows, path, shell_flags) < 0) {
         if (!b0)
             eb_free(&b);
         return NULL;
@@ -2598,14 +2646,15 @@ EditBuffer *new_shell_buffer(EditBuffer *b0, EditState *e,
 
 /* If a window is attached to buffer b, activate it,
    otherwise attach window s to buffer b.
+   *sp is not NULL.
  */
 static EditBuffer *try_show_buffer(EditState **sp, const char *bufname)
 {
     EditState *e, *s = *sp;
-    QEmacsState *qs = s->qe_state;
+    QEmacsState *qs = s->qs;
     EditBuffer *b;
 
-    b = eb_find(bufname);
+    b = qe_find_buffer_name(qs, bufname);
     if (b && s->b != b) {
         e = eb_find_window(b, NULL);
         if (e) {
@@ -2664,8 +2713,8 @@ static void do_shell(EditState *e, int argval)
     }
 
     /* create new shell buffer or restart shell in current buffer */
-    b = new_shell_buffer(b, e, "*shell*", "Shell process", curpath, NULL,
-                         SF_COLOR | SF_INTERACTIVE);
+    b = qe_new_shell_buffer(e->qs, b, e, "*shell*", "Shell process",
+                            curpath, NULL, SF_COLOR | SF_INTERACTIVE);
     if (!b)
         return;
 
@@ -2691,7 +2740,7 @@ static void do_man(EditState *s, const char *arg)
     if (s->flags & WF_POPLEFT) {
         /* avoid messing with the dired pane */
         s = find_window(s, KEY_RIGHT, s);
-        s->qe_state->active_window = s;
+        s->qs->active_window = s;
     }
 
     /* Assume standard man command */
@@ -2702,8 +2751,8 @@ static void do_man(EditState *s, const char *arg)
         return;
 
     /* create new buffer */
-    b = new_shell_buffer(NULL, s, bufname, NULL, NULL, cmd,
-                         SF_COLOR | SF_INFINITE);
+    b = qe_new_shell_buffer(s->qs, NULL, s, bufname, NULL,
+                            NULL, cmd, SF_COLOR | SF_INFINITE);
     if (!b)
         return;
 
@@ -2725,7 +2774,7 @@ static void do_ssh(EditState *s, const char *arg)
     if (s->flags & WF_POPLEFT) {
         /* avoid messing with the dired pane */
         s = find_window(s, KEY_RIGHT, s);
-        s->qe_state->active_window = s;
+        s->qs->active_window = s;
     }
 
     /* Use standard ssh command */
@@ -2733,8 +2782,8 @@ static void do_ssh(EditState *s, const char *arg)
     snprintf(bufname, sizeof(bufname), "*ssh-%s*", arg);
 
     /* create new buffer */
-    b = new_shell_buffer(NULL, s, bufname, "ssh", NULL, cmd,
-                         SF_COLOR | SF_INTERACTIVE);
+    b = qe_new_shell_buffer(s->qs, NULL, s, bufname, "ssh",
+                            NULL, cmd, SF_COLOR | SF_INTERACTIVE);
     if (!b)
         return;
 
@@ -3102,14 +3151,14 @@ static void do_shell_yank(EditState *e)
          * made asynchronous via an auxiliary buffer.
          */
         int offset;
-        QEmacsState *qs = e->qe_state;
+        QEmacsState *qs = e->qs;
         EditBuffer *b = qs->yank_buffers[qs->yank_current];
 
         e->b->mark = e->offset;
 
         if (b) {
             if (b->total_size > 1024) {
-                put_status(e, "too much data to yank at shell prompt");
+                put_error(e, "Too much data to yank at shell prompt");
                 return;
             }
             for (offset = 0; offset < b->total_size;) {
@@ -3157,6 +3206,7 @@ static void do_shell_tabulate(EditState *e)
     if (e->interactive) {
         shell_write_char(e, 9);
     } else {
+        //do_tabulate(s, 1);
         text_write_char(e, 9);
     }
 }
@@ -3166,7 +3216,7 @@ static void do_shell_refresh(EditState *e, int flags)
     ShellState *s;
 
     if ((s = shell_get_state(e, 1)) != NULL) {
-        QEmacsState *qs = e->qe_state;
+        QEmacsState *qs = e->qs;
         EditState *e1;
 
         /* update the terminal size and notify process */
@@ -3191,7 +3241,7 @@ static void do_shell_refresh(EditState *e, int flags)
     if (flags & SR_REFRESH)
         do_refresh_complete(e);
     if (s && !(flags & SR_SILENT)) {
-        put_status(e, "terminal size set to %d by %d", s->cols, s->rows);
+        put_status(e, "Terminal size set to %d by %d", s->cols, s->rows);
     }
 }
 
@@ -3207,7 +3257,7 @@ static void do_shell_toggle_input(EditState *e)
         if ((s->shell_flags & SF_INTERACTIVE) && e->offset >= e->b->total_size) {
             e->interactive = 1;
             if (s->grab_keys)
-                qe_grab_keys(shell_key, s);
+                qe_grab_keys(s->base.qs, shell_key, s);
 #if 0
             if (e->interactive) {
                 qe_term_update_cursor(s);
@@ -3284,30 +3334,28 @@ static char *shell_get_default_path(EditBuffer *b, int offset,
 static void do_shell_command(EditState *e, const char *cmd)
 {
     char curpath[MAX_FILENAME_SIZE];
+    QEmacsState *qs = e->qs;
     EditBuffer *b;
 
     get_default_path(e->b, e->offset, curpath, sizeof curpath);
 
-    /* if the buffer already exists, kill it */
-    b = eb_find("*shell command output*");
-    if (b) {
-        qe_kill_buffer(b);
-    }
-
     /* create new buffer */
-    b = new_shell_buffer(NULL, e, "*shell command output*", NULL, curpath, cmd,
-                         SF_COLOR | SF_INFINITE);
+    b = qe_new_shell_buffer(qs, NULL, e, "*shell command output*", NULL,
+                            curpath, cmd, SF_COLOR | SF_INFINITE |
+                            SF_REUSE_BUFFER | SF_ERASE_BUFFER);
     if (!b)
         return;
 
     /* XXX: try to split window if necessary */
     switch_to_buffer(e, b);
+    // FIXME: if command prompts for input, the buffer should use shell_mode
     edit_set_mode(e, &pager_mode);
 }
 
 static void do_compile(EditState *s, const char *cmd)
 {
     char curpath[MAX_FILENAME_SIZE];
+    QEmacsState *qs = s->qs;
     EditBuffer *b;
 
     if (s->flags & (WF_POPUP | WF_MINIBUF))
@@ -3318,21 +3366,16 @@ static void do_compile(EditState *s, const char *cmd)
     if (s->flags & WF_POPLEFT) {
         /* avoid messing with the dired pane */
         s = find_window(s, KEY_RIGHT, s);
-        s->qe_state->active_window = s;
-    }
-
-    /* if the buffer already exists, kill it */
-    b = eb_find("*compilation*");
-    if (b) {
-        qe_kill_buffer(b);
+        qs->active_window = s;
     }
 
     if (!cmd || !*cmd)
         cmd = "make";
 
     /* create new buffer */
-    b = new_shell_buffer(NULL, s, "*compilation*", "Compilation", curpath, cmd,
-                         SF_COLOR | SF_INFINITE);
+    b = qe_new_shell_buffer(qs, NULL, s, "*compilation*", "Compilation",
+                            curpath, cmd, SF_COLOR | SF_INFINITE |
+                            SF_REUSE_BUFFER | SF_ERASE_BUFFER);
     if (!b)
         return;
 
@@ -3345,7 +3388,7 @@ static void do_compile(EditState *s, const char *cmd)
 
 static void do_next_error(EditState *s, int arg, int dir)
 {
-    QEmacsState *qs = s->qe_state;
+    QEmacsState *qs = s->qs;
     EditState *e;
     EditBuffer *b;
     int offset, found_offset;
@@ -3368,11 +3411,11 @@ static void do_next_error(EditState *s, int arg, int dir)
      * in buffer least recently used order
      */
 
-    if ((b = eb_find(error_buffer)) == NULL) {
-        if ((b = eb_find("*compilation*")) == NULL
-        &&  (b = eb_find("*shell*")) == NULL
-        &&  (b = eb_find("*errors*")) == NULL) {
-            put_status(s, "No compilation buffer");
+    if ((b = qe_find_buffer_name(qs, error_buffer)) == NULL) {
+        if ((b = qe_find_buffer_name(qs, "*compilation*")) == NULL
+        &&  (b = qe_find_buffer_name(qs, "*shell*")) == NULL
+        &&  (b = qe_find_buffer_name(qs, "*errors*")) == NULL) {
+            put_error(s, "No compilation buffer");
             return;
         }
         set_error_offset(b, -1);
@@ -3386,12 +3429,12 @@ static void do_next_error(EditState *s, int arg, int dir)
         if (dir > 0) {
             offset = eb_next_line(b, offset);
             if (offset >= b->total_size) {
-                put_status(s, "No more errors");
+                put_error(s, "No more errors");
                 return;
             }
         } else {
             if (offset <= 0) {
-                put_status(s, "No previous error");
+                put_error(s, "No previous error");
                 return;
             }
             offset = eb_prev_line(b, offset);
@@ -3474,10 +3517,15 @@ static void do_next_error(EditState *s, int arg, int dir)
     do_find_file(s, fullpath, 0);
     do_goto_line(qs->active_window, line_num, col_num);
 
+    if (!qs->first_transient_key) {
+        qe_register_transient_binding(qs, "next-error", "M-n");
+        qe_register_transient_binding(qs, "previous-error", "M-p");
+    }
+
     put_status(s, "=> %s", error_message);
 }
 
-static int match_digits(char32_t *buf, int n, char32_t sep) {
+static int match_digits(const char32_t *buf, int n, char32_t sep) {
     if (n >= 2 && qe_isdigit(buf[0])) {
         int i = 1;
         while (i < n && qe_isdigit(buf[i]))
@@ -3489,21 +3537,32 @@ static int match_digits(char32_t *buf, int n, char32_t sep) {
     return 0;
 }
 
-static int match_string(char32_t *buf, int n, const char *str) {
+static int match_string(const char32_t *buf, int n, const char *str) {
     int i;
     for (i = 0; i < n && str[i] && buf[i] == (u8)str[i]; i++)
         continue;
     return (str[i] == '\0') ? i : 0;
 }
 
-static int shell_grab_filename(const char32_t *buf, int n, char *dest, int size) {
-    int i, len = 0;
+static int shell_grab_filename(const char32_t *buf, int n,
+                               char *dest, int size, int filter)
+{
+    int i, j, len = 0;
     for (i = 0; i < n; i++) {
         char32_t c = buf[i];
-        if (c == '(')
-            break;
-        if (c == ':' && i > 1)
-            break;
+        if (filter) {
+            if (c == '(')
+                break;
+            if (c == ':' && i > 1)
+                break;
+            if (c == '-' && i > 1) {
+                /* match -[0-9]+- for grep -[ABC] output */
+                for (j = i + 1; qe_isdigit(buf[j]); j++)
+                    continue;
+                if (j > i + 1 && buf[j] == '-')
+                    break;
+            }
+        }
         if (qe_isspace(c)) {
             if (len)
                 break;
@@ -3527,8 +3586,8 @@ static int shell_grab_filename(const char32_t *buf, int n, char *dest, int size)
 static ModeDef *mode_cache[STATE_SHELL_MODE + 1];
 static int mode_cache_len = 1;
 
-static int shell_find_mode(const char *filename) {
-    ModeDef *m = qe_find_mode_filename(filename, MODEF_SYNTAX);
+static int qe_shell_find_mode(QEmacsState *qs, const char *filename) {
+    ModeDef *m = qe_find_mode_filename(qs, filename, MODEF_SYNTAX);
     int i;
 
     for (i = 0; i < mode_cache_len; i++) {
@@ -3544,7 +3603,8 @@ static int shell_find_mode(const char *filename) {
 }
 
 void shell_colorize_line(QEColorizeContext *cp,
-                         char32_t *str, int n, ModeDef *syn)
+                         const char32_t *str, int n,
+                         QETermStyle *sbuf, ModeDef *syn)
 {
     /* detect match lines for known languages and colorize accordingly */
     char filename[MAX_FILENAME_SIZE];
@@ -3558,12 +3618,11 @@ void shell_colorize_line(QEColorizeContext *cp,
         /* Detect patches and colorize according to filename */
         if (str[0] == '+' || str[0] == '-') {
             if (match_string(str, n, "+++ ") || match_string(str, n, "--- ")) {
-                shell_grab_filename(str + 4, n - 4, filename, countof(filename));
-                cp->colorize_state = shell_find_mode(filename);
+                shell_grab_filename(str + 4, n - 4, filename, countof(filename), FALSE);
+                cp->colorize_state = qe_shell_find_mode(cp->s->qs, filename);
                 cp->colorize_state |= STATE_SHELL_SKIP | STATE_SHELL_KEEP;
                 return;
-            } else
-            if (match_string(str, n, "+") || match_string(str, n, "-")) {
+            } else {
                 start = 1;
             }
         } else
@@ -3573,6 +3632,9 @@ void shell_colorize_line(QEColorizeContext *cp,
             else
                 return;
         } else
+        if (match_string(str, n, "diff ") || match_string(str, n, "Only in ")) {
+            return;
+        } else
         if (match_string(str, n, "@@")) {
             /* patch diff location lines */
             cp->colorize_state &= STATE_SHELL_MASK;  /* reset potential comment state */
@@ -3581,9 +3643,9 @@ void shell_colorize_line(QEColorizeContext *cp,
         if (match_string(str, n, "==> ")) {
             /* head and tail file marker */
             i = 4;
-            i += shell_grab_filename(str + i, n - i, filename, countof(filename));
+            i += shell_grab_filename(str + i, n - i, filename, countof(filename), FALSE);
             if (match_string(str + i, n - i, " <==")) {
-                cp->colorize_state = shell_find_mode(filename);
+                cp->colorize_state = qe_shell_find_mode(cp->s->qs, filename);
                 cp->colorize_state |= STATE_SHELL_KEEP;
                 return;
             }
@@ -3607,8 +3669,8 @@ void shell_colorize_line(QEColorizeContext *cp,
                         for (k = 0; commands[k]; k++) {
                             if ((w = match_string(str + i, n - i, commands[k])) != 0) {
                                 i += w;
-                                shell_grab_filename(str + i, n - i, filename, countof(filename));
-                                cp->colorize_state = shell_find_mode(filename);
+                                shell_grab_filename(str + i, n - i, filename, countof(filename), FALSE);
+                                cp->colorize_state = qe_shell_find_mode(cp->s->qs, filename);
                                 cp->colorize_state |= STATE_SHELL_KEEP;
                                 start = n;
                                 return;
@@ -3617,7 +3679,7 @@ void shell_colorize_line(QEColorizeContext *cp,
                     }
                 } else {
                     int mc;
-                    w = shell_grab_filename(str + i, n - i, filename, countof(filename));
+                    w = shell_grab_filename(str + i, n - i, filename, countof(filename), TRUE);
                     if (i == 0) {
                         char *p = strchr(filename, '@');
                         if (p != NULL && p > filename && p[-1] != ' ') {
@@ -3631,22 +3693,23 @@ void shell_colorize_line(QEColorizeContext *cp,
                         continue;
                     }
                     i += w;
-                    mc = shell_find_mode(filename);
+                    mc = qe_shell_find_mode(cp->s->qs, filename);
                     if (!mc)
                         continue;
                     c = str[i];
-                    if (c == "()"[0]) {
+                    if (c == '(') {
                         /* this is an old style filename position */
-                        i += match_digits(str + i, n - i, "()"[1]);
+                        i += match_digits(str + i, n - i, ')');
                         i += (str[i] == ':');
                         cp->colorize_state = mc;
                         start = i;
                         break;
                     }
-                    if (c == ':') {
+                    /* colorize compiler and grep -[ABC] output */
+                    if (c == ':' || (c == '-' && qe_isdigit(str[i + 1]))) {
                         /* this is a compiler message */
-                        i += match_digits(str + i, n - i, ':'); /* line number */
-                        i += match_digits(str + i, n - i, ':'); /* optional col number */
+                        i += match_digits(str + i, n - i, c); /* line number */
+                        i += match_digits(str + i, n - i, c); /* optional col number */
                         start = i;
                         cp->colorize_state = mc;
                         if (match_string(str + i, n - i, " error:")
@@ -3666,7 +3729,9 @@ void shell_colorize_line(QEColorizeContext *cp,
     &&  (m = mode_cache[cp->colorize_state & STATE_SHELL_MODE]) != NULL) {
         int save_state = cp->colorize_state;
         cp->colorize_state >>= STATE_SHELL_SHIFT;
-        m->colorize_func(cp, str + start, n - start, m);
+        cp->partial_file++;
+        cp_colorize_line(cp, str, start, n, sbuf, m);
+        cp->partial_file--;
         if (save_state & STATE_SHELL_KEEP) {
             cp->colorize_state <<= STATE_SHELL_SHIFT;
             cp->colorize_state |= save_state & STATE_SHELL_MASK;
@@ -3675,9 +3740,8 @@ void shell_colorize_line(QEColorizeContext *cp,
         }
         cp->combine_stop = start;
         /* Colorize trailing blanks if colorizing shell output */
-        for (i = n; i > start && qe_isblank(str[i - 1] & CHAR_MASK); i--) {
-            str[i - 1] &= CHAR_MASK;
-            SET_COLOR1(str, i - 1, QE_STYLE_BLANK_HILITE);
+        for (i = n; i > start && qe_isblank(str[i - 1]); i--) {
+            SET_STYLE1(sbuf, i - 1, QE_STYLE_BLANK_HILITE);
         }
     } else {
         cp->colorize_state = 0;
@@ -3835,7 +3899,7 @@ static const char * const pager_bindings[] = {
     NULL
 };
 
-static int shell_init(void)
+static int shell_init(QEmacsState *qs)
 {
     /* populate and register shell mode and commands */
     // XXX: remove this mess: should just inherit with fallback
@@ -3860,9 +3924,9 @@ static int shell_init(void)
     shell_mode.delete_bytes = shell_delete_bytes;
     shell_mode.get_default_path = shell_get_default_path;
 
-    qe_register_mode(&shell_mode, MODEF_NOCMD | MODEF_VIEW);
-    qe_register_commands(&shell_mode, shell_commands, countof(shell_commands));
-    qe_register_commands(NULL, shell_global_commands, countof(shell_global_commands));
+    qe_register_mode(qs, &shell_mode, MODEF_NOCMD | MODEF_VIEW);
+    qe_register_commands(qs, &shell_mode, shell_commands, countof(shell_commands));
+    qe_register_commands(qs, NULL, shell_global_commands, countof(shell_global_commands));
 
     /* populate and register pager mode and commands */
     // XXX: remove this mess: should just inherit with fallback
@@ -3872,7 +3936,7 @@ static int shell_init(void)
     pager_mode.mode_init = pager_mode_init;
     pager_mode.bindings = pager_bindings;
 
-    qe_register_mode(&pager_mode, MODEF_NOCMD | MODEF_VIEW);
+    qe_register_mode(qs, &pager_mode, MODEF_NOCMD | MODEF_VIEW);
 
     return 0;
 }

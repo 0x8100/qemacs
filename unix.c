@@ -2,7 +2,7 @@
  * Unix main loop for QEmacs
  *
  * Copyright (c) 2002, 2003 Fabrice Bellard.
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -317,24 +317,26 @@ static void url_block(void)
 #endif
 }
 
-void url_main_loop(void (*init)(void *opaque), void *opaque)
+int url_main_loop(int (*init)(void *opaque), void *opaque)
 {
+    QEArgs *ap = opaque;
     url_block_reset();
-    (*init)(opaque);
+    if ((*init)(opaque))
+        return 1;
     for (;;) {
         if (url_exit_request)
             break;
         url_block();
         if (url_display_request) {
-            QEmacsState *qs = &qe_state;
+            QEmacsState *qs = ap->qs;
 
             //qs->complete_refresh = 1;
-            do_refresh(NULL);
-            edit_display(qs);
-            dpy_flush(qs->screen);
+            do_refresh(qs->first_window);
+            qe_display(qs);
             url_display_request = 0;
         }
     }
+    return 0;
 }
 
 /* exit from url loop */

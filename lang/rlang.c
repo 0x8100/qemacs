@@ -1,7 +1,7 @@
 /*
  * R language mode for QEmacs.
  *
- * Copyright (c) 2015-2023 Charlie Gordon.
+ * Copyright (c) 2015-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -62,7 +62,8 @@ enum {
 };
 
 static void r_colorize_line(QEColorizeContext *cp,
-                            char32_t *str, int n, ModeDef *syn)
+                            const char32_t *str, int n,
+                            QETermStyle *sbuf, ModeDef *syn)
 {
     char keyword[MAX_KEYWORD_SIZE];
     int i = 0, j, start, style, len, level, funclevel;
@@ -150,8 +151,6 @@ static void r_colorize_line(QEColorizeContext *cp,
                     }
                 }
                 keyword[len] = '\0';
-                for (j = i; qe_isblank(str[j]); j++)
-                    continue;
                 if (strfind(syn->keywords, keyword)) {
                     if (strequal(keyword, "function"))
                         funclevel = level + 1;
@@ -166,6 +165,7 @@ static void r_colorize_line(QEColorizeContext *cp,
                     style = R_STYLE_ARGDEF;
                     break;
                 }
+                j = cp_skip_blanks(str, i, n);
                 if (str[j] == '=' && str[j + 1] != '=') {
                     style = R_STYLE_ARGNAME;
                     break;
@@ -180,7 +180,7 @@ static void r_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -209,10 +209,9 @@ static ModeDef r_mode = {
     .colorize_func = r_colorize_line,
 };
 
-static int r_init(void)
+static int r_init(QEmacsState *qs)
 {
-    qe_register_mode(&r_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &r_mode, MODEF_SYNTAX);
     return 0;
 }
 

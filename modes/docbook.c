@@ -2,7 +2,7 @@
  * WYSIWYG Docbook mode for QEmacs.
  *
  * Copyright (c) 2002 Fabrice Bellard.
- * Copyright (c) 2003-2023 Charlie Gordon.
+ * Copyright (c) 2003-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -49,7 +49,7 @@ static int docbook_mode_init(EditState *s, EditBuffer *b, int flags)
 
 static ModeDef docbook_mode;
 
-static int docbook_init(void)
+static int docbook_init(QEmacsState *qs)
 {
     /* inherit from html mode */
     // XXX: remove this mess: should just inherit with fallback
@@ -63,7 +63,7 @@ static int docbook_init(void)
     docbook_mode.mode_probe = docbook_mode_probe;
     docbook_mode.mode_init = docbook_mode_init;
 
-    qe_register_mode(&docbook_mode, MODEF_VIEW);
+    qe_register_mode(qs, &docbook_mode, MODEF_VIEW);
     return 0;
 }
 

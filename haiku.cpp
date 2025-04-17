@@ -2,7 +2,7 @@
  * Haiku driver for QEmacs
  *
  * Copyright (c) 2013 Francois Revol.
- * Copyright (c) 2015-2023 Charlie Gordon.
+ * Copyright (c) 2015-2024 Charlie Gordon.
  * Copyright (c) 2002 Fabrice Bellard.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -362,12 +362,13 @@ extern int32 atomic_get_and_set(int32 *p, int32 v);
 static void haiku_handle_event(void *opaque)
 {
     QEditScreen *s = (QEditScreen *)opaque;
+    QEmacsState *qs = s->qs;
     WindowState *ctx = (WindowState *)s->priv_data;
     bigtime_t timestamp_ms;
     BMessage *event;
     //fprintf(stderr, "%s()\n", __FUNCTION__);
-    int shift, ctrl, meta, key = 0;
-    QEEvent ev1, *ev = &ev1;
+    int key_state, key = -1;
+    QEEvent ev1, *ev = qe_event_clear(&ev1);
 
     if (read(ctx->events_rd, &event, sizeof(event)) < (signed)sizeof(event))
         return;
@@ -376,23 +377,20 @@ static void haiku_handle_event(void *opaque)
     case B_QUIT_REQUESTED:
         // cancel pending operation
         ev->key_event.type = QE_KEY_EVENT;
-        ev->key_event.key = KEY_CTRL('g');
-        qe_handle_event(ev);
+        ev->key_event.key = KEY_QUIT;       // C-g
+        qe_handle_event(qs, ev);
 
-        // simulate C-x C-c
+        // exit qemacs
         ev->key_event.type = QE_KEY_EVENT;
-        ev->key_event.key = KEY_CTRL('x');
-        qe_handle_event(ev);
-        ev->key_event.type = QE_KEY_EVENT;
-        ev->key_event.key = KEY_CTRL('c');
-        qe_handle_event(ev);
+        ev->key_event.key = KEY_EXIT;       // C-x C-c
+        qe_handle_event(qs, ev);
         break;
 
     case _UPDATE_:
         // flush queued repaints
         if (atomic_get_and_set(&repaints, 0)) {
             ev->expose_event.type = QE_EXPOSE_EVENT;
-            qe_handle_event(ev);
+            qe_handle_event(qs, ev);
         }
         break;
 
@@ -414,7 +412,7 @@ static void haiku_handle_event(void *opaque)
             ctx->v->UnlockLooper();
 
             //ev->expose_event.type = QE_EXPOSE_EVENT;
-            //qe_handle_event(ev);
+            //qe_handle_event(qs, ev);
         }
         break;
 
@@ -423,9 +421,10 @@ static void haiku_handle_event(void *opaque)
             BPoint pt;
 
             ev->button_event.type = QE_MOTION_EVENT;
+            // TODO: set shift state
             ev->button_event.x = (int)pt.x;
             ev->button_event.y = (int)pt.y;
-            qe_handle_event(ev);
+            qe_handle_event(qs, ev);
         }
         break;
 
@@ -442,6 +441,7 @@ static void haiku_handle_event(void *opaque)
 
             if (event->FindPoint("where", &pt) < B_OK)
                 pt = BPoint(0,0);
+            // TODO: set shift state
             ev->button_event.x = (int)pt.x;
             ev->button_event.y = (int)pt.y;
 
@@ -456,7 +456,7 @@ static void haiku_handle_event(void *opaque)
             else if (buttons & B_TERTIARY_MOUSE_BUTTON)
                 ev->button_event.button = QE_BUTTON_RIGHT;
 
-            qe_handle_event(ev);
+            qe_handle_event(qs, ev);
         }
         break;
 
@@ -465,6 +465,7 @@ static void haiku_handle_event(void *opaque)
             float delta;
 
             ev->button_event.type = QE_BUTTON_PRESS_EVENT;
+            // TODO: set shift state
             ev->button_event.x = 0;
             ev->button_event.y = 0;
 
@@ -478,7 +479,7 @@ static void haiku_handle_event(void *opaque)
             else
                 break;
 
-            qe_handle_event(ev);
+            qe_handle_event(qs, ev);
         }
         break;
 
@@ -525,23 +526,26 @@ static void haiku_handle_event(void *opaque)
             if (!numbytes)
                 numbytes = strlen(bytes);
 
-            shift = (state & B_SHIFT_KEY);
-            ctrl = (state & B_CONTROL_KEY);
-            meta = (state & (B_LEFT_OPTION_KEY | B_COMMAND_KEY));
+            key_state = 0;
+            if (state & B_SHIFT_KEY)
+                key_state = KEY_STATE_SHIFT;
+            if (state & B_CONTROL_KEY)
+                key_state = KEY_STATE_CONTROL;
+            if (state & B_LEFT_OPTION_KEY)
+                key_state = KEY_STATE_META;
+            if (state & B_COMMAND_KEY)
+                key_state = KEY_STATE_COMMAND;
 
-            //fprintf(stderr, "%cshift %cctrl %cmeta numbytes %d \n",
-            //        shift ? ' ' : '!', ctrl ? ' ' : '!', meta ? ' ' : '!', numbytes);
+            //fprintf(stderr, "state=%d numbytes %d \n", state, numbytes);
 
             char byte = 0;
             if (numbytes == 1) {
                 byte = bytes[0];
-                if (state & B_CONTROL_KEY)
-                    byte = (char)raw_char;
+                //if (state & B_CONTROL_KEY)
+                //    byte = (char)raw_char;
                 switch (byte) {
                 case B_BACKSPACE:
                     key = KEY_DEL;
-                    if (meta)
-                        key = KEY_META(KEY_DEL);
                     break;
                 case B_TAB:
                     key = KEY_TAB;
@@ -562,10 +566,10 @@ static void haiku_handle_event(void *opaque)
                     key = KEY_INSERT;
                     break;
                 case B_HOME:
-                    key = ctrl ? KEY_CTRL_HOME : KEY_HOME;
+                    key = KEY_HOME;
                     break;
                 case B_END:
-                    key = ctrl ? KEY_CTRL_END : KEY_END;
+                    key = KEY_END;
                     break;
                 case B_PAGE_UP:
                     key = KEY_PAGEUP;
@@ -574,10 +578,10 @@ static void haiku_handle_event(void *opaque)
                     key = KEY_PAGEDOWN;
                     break;
                 case B_LEFT_ARROW:
-                    key = ctrl ? KEY_CTRL_LEFT : KEY_LEFT;
+                    key = KEY_LEFT;
                     break;
                 case B_RIGHT_ARROW:
-                    key = ctrl ? KEY_CTRL_RIGHT : KEY_RIGHT;
+                    key = KEY_RIGHT;
                     break;
                 case B_UP_ARROW:
                     key = KEY_UP;
@@ -599,7 +603,7 @@ static void haiku_handle_event(void *opaque)
                     case B_F10_KEY:
                     case B_F11_KEY:
                     case B_F12_KEY:
-                        key = KEY_F1 + scancode - B_F1_KEY;
+                        key = KEY_F1 + (scancode - B_F1_KEY);
                         break;
                     case B_PRINT_KEY:
                     case B_SCROLL_KEY:
@@ -611,26 +615,22 @@ static void haiku_handle_event(void *opaque)
                 case 0:
                     break;
                 default:
-                    if (byte >= ' ' && byte <= '~') {
-                        if (meta)
-                            key = KEY_META(' ') + byte - ' ';
-                        else if (ctrl)
-                            key = KEY_CTRL(byte);
-                        else
-                            key = byte;
-                    }
+                    if (byte >= ' ' && byte <= '~')
+                        key = byte;
+                    break;
                 }
+                if (key < 0)
+                    break;
+                key = get_modified_key(key, key_state);
             } else {
                 const char *p = bytes;
                 key = utf8_decode(&p);
             }
 
-        //got_key:
-            if (key) {
-                ev->key_event.type = QE_KEY_EVENT;
-                ev->key_event.key = key;
-                qe_handle_event(ev);
-            }
+            ev->key_event.type = QE_KEY_EVENT;
+            ev->key_event.shift = key_state;
+            ev->key_event.key = key;
+            qe_handle_event(qs, ev);
         }
         break;
     }
@@ -893,13 +893,14 @@ static QEDisplay haiku_dpy = {
     NULL, /* dpy_draw_picture */
     haiku_full_screen,
     NULL, /* dpy_describe */
+    NULL, /* dpy_sound_bell */
+    NULL, /* dpy_suspend */
+    qe_dpy_error, /* dpy_error */
     NULL, /* next */
 };
 
-static int haiku_init(void)
+static int haiku_module_init(QEmacsState *qs)
 {
-    QEmacsState *qs = &qe_state;
-
     /* override default res path, to find config file at native location */
     BPath path;
     BString old(":");
@@ -914,7 +915,7 @@ static int haiku_init(void)
     if (force_tty)
         return 0;
 
-    return qe_register_display(&haiku_dpy);
+    return qe_register_display(qs, &haiku_dpy);
 }
 
-qe_module_init(haiku_init);
+qe_module_init(haiku_module_init);

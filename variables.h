@@ -1,7 +1,7 @@
 /*
  * Module for handling variables in QEmacs
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -100,7 +100,7 @@ struct VarDef {
 #define W_VAR(name,fld,type,rw,desc)  W_VAR_F(name, fld, type, rw, NULL, desc)
 #define M_VAR(name,fld,type,rw,desc)  M_VAR_F(name, fld, type, rw, NULL, desc)
 
-void qe_register_variables(VarDef *vars, int count);
+void qe_register_variables(QEmacsState *qs, VarDef *vars, int count);
 void variable_complete(CompleteState *cp, CompleteFunc enumerate);
 int eb_variable_print_entry(EditBuffer *b, VarDef *vp, EditState *s);
 int variable_print_entry(CompleteState *cp, EditState *s, const char *name);

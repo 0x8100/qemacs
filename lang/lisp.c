@@ -234,7 +234,8 @@ static int lisp_is_number(const char *str)
 }
 
 static void lisp_colorize_line(QEColorizeContext *cp,
-                               char32_t *str, int n, ModeDef *syn)
+                               const char32_t *str, int n,
+                               QETermStyle *sbuf, ModeDef *syn)
 {
     int colstate = cp->colorize_state;
     int i = 0, start = i, len, level, style, style1, has_expr;
@@ -274,7 +275,7 @@ static void lisp_colorize_line(QEColorizeContext *cp,
         case ')':
             if (colstate & IN_LISP_SCOMMENT) {
                 if (level-- <= 1) {
-                    SET_COLOR(str, start, i - (level < 0), style1);
+                    SET_STYLE(sbuf, start, i - (level < 0), style1);
                     colstate &= ~IN_LISP_SCOMMENT;
                     level = 0;
                     style1 = 0;
@@ -443,7 +444,7 @@ static void lisp_colorize_line(QEColorizeContext *cp,
             }
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -505,7 +506,7 @@ static ModeDef racket_mode = {
 
 static ModeDef clojure_mode = {
     .name = "Clojure",
-    .extensions = "clj",
+    .extensions = "clj|cljc",
     .keywords = clojure_keywords,
     .types = lisp_types,
     .colorize_func = lisp_colorize_line,
@@ -537,15 +538,15 @@ static ModeDef xaos_mode = {
     .fallback = &lisp_mode,
 };
 
-static int lisp_init(void)
+static int lisp_init(QEmacsState *qs)
 {
-    qe_register_mode(&lisp_mode, MODEF_SYNTAX);
-    qe_register_mode(&elisp_mode, MODEF_SYNTAX);
-    qe_register_mode(&scheme_mode, MODEF_SYNTAX);
-    qe_register_mode(&racket_mode, MODEF_SYNTAX);
-    qe_register_mode(&clojure_mode, MODEF_SYNTAX);
-    qe_register_mode(&sandbox_mode, MODEF_SYNTAX);
-    qe_register_mode(&xaos_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &lisp_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &elisp_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &scheme_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &racket_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &clojure_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &sandbox_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &xaos_mode, MODEF_SYNTAX);
 
     return 0;
 }

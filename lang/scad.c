@@ -1,7 +1,7 @@
 /*
  * OpenSCAD language mode for QEmacs.
  *
- * Copyright (c) 2000-2023 Charlie Gordon.
+ * Copyright (c) 2000-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -62,7 +62,8 @@ enum {
 };
 
 static void scad_colorize_line(QEColorizeContext *cp,
-                               char32_t *str, int n, ModeDef *syn)
+                               const char32_t *str, int n,
+                               QETermStyle *sbuf, ModeDef *syn)
 {
     char keyword[16];
     int i = 0, start = i, style = 0, k, len, laststyle = 0, isnum;
@@ -163,9 +164,7 @@ static void scad_colorize_line(QEColorizeContext *cp,
                 if (strfind(syn->types, keyword)) {
                     style = SCAD_STYLE_TYPE;
                 } else {
-                    k = i;
-                    if (qe_isblank(str[k]))
-                        k++;
+                    k = cp_skip_blanks(str, i, n);
                     if ((level & 2) && str[k] == '=') {
                         style = SCAD_STYLE_ARGNAME;
                     } else
@@ -180,7 +179,7 @@ static void scad_colorize_line(QEColorizeContext *cp,
         }
         if (style) {
             laststyle = style;
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -197,10 +196,9 @@ static ModeDef scad_mode = {
     //.auto_indent = 1,
 };
 
-static int scad_init(void)
+static int scad_init(QEmacsState *qs)
 {
-    qe_register_mode(&scad_mode, MODEF_SYNTAX);
-
+    qe_register_mode(qs, &scad_mode, MODEF_SYNTAX);
     return 0;
 }
 

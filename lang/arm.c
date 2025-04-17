@@ -1,7 +1,7 @@
 /*
  * Miscellaneous QEmacs modes for arm development related file formats
  *
- * Copyright (c) 2014-2023 Charlie Gordon.
+ * Copyright (c) 2014-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -49,7 +49,8 @@ enum {
 #define MAX_KEYWORD_SIZE  16
 
 static void arm_asm_colorize_line(QEColorizeContext *cp,
-                                  char32_t *str, int n, ModeDef *syn)
+                                  const char32_t *str, int n,
+                                  QETermStyle *sbuf, ModeDef *syn)
 {
     char keyword[MAX_KEYWORD_SIZE];
     int i = 0, start = 0, style = 0, klen, w = 0, wn = 0;
@@ -59,8 +60,7 @@ static void arm_asm_colorize_line(QEColorizeContext *cp,
     if (colstate & IN_ASM_TRAIL)
         goto comment;
 
-    for (; qe_isblank(str[i]); i++)
-        continue;
+    i = cp_skip_blanks(str, i, n);
 
     for (w = i; i < n;) {
         start = i;
@@ -159,7 +159,7 @@ static void arm_asm_colorize_line(QEColorizeContext *cp,
             continue;
         }
         if (style) {
-            SET_COLOR(str, start, i, style);
+            SET_STYLE(sbuf, start, i, style);
             style = 0;
         }
     }
@@ -173,9 +173,9 @@ static ModeDef arm_asm_mode = {
     .colorize_func = arm_asm_colorize_line,
 };
 
-static int arm_asm_init(void)
+static int arm_asm_init(QEmacsState *qs)
 {
-    qe_register_mode(&arm_asm_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &arm_asm_mode, MODEF_SYNTAX);
     return 0;
 }
 
@@ -201,7 +201,8 @@ enum {
 };
 
 static void lst_colorize_line(QEColorizeContext *cp,
-                              char32_t *str, int n, ModeDef *syn)
+                              const char32_t *str, int n,
+                              QETermStyle *sbuf, ModeDef *syn)
 {
     /* Combined assembly / C source / filename listing:
      * determine line type by looking at line start
@@ -210,8 +211,7 @@ static void lst_colorize_line(QEColorizeContext *cp,
     int i, w, start, colstate = cp->colorize_state;
     char32_t c;
 
-    for (w = 0; qe_isblank(str[w]); w++)
-        continue;
+    w = cp_skip_blanks(str, 0, n);
 
     if (str[0] && str[1] == ':' && str[2] == '\\') {
         /* has full DOS/Windows pathname */
@@ -221,7 +221,7 @@ static void lst_colorize_line(QEColorizeContext *cp,
         if (ustristr(str, ".cpp:")) {
             colstate = IN_LST_CODE_CPP;
         }
-        SET_COLOR(str, 0, n, LST_STYLE_FILENAME);
+        SET_STYLE(sbuf, 0, n, LST_STYLE_FILENAME);
     } else {
         int has_assembly = 0;
 
@@ -236,42 +236,39 @@ static void lst_colorize_line(QEColorizeContext *cp,
             colstate = 0;
             start = w;
             i += 1;
-            SET_COLOR(str, start, i, LST_STYLE_OFFSET);
+            SET_STYLE(sbuf, start, i, LST_STYLE_OFFSET);
 
-            for (; qe_isblank(str[i]); i++)
-                continue;
+            i = cp_skip_blanks(str, i, n);
             for (start = i; qe_isxdigit(str[i]); i++)
                 continue;
             if (str[i] == ' ' && qe_isxdigit(str[i + 1])) {
                 for (i += 2; qe_isxdigit(str[i]); i++)
                     continue;
             }
-            SET_COLOR(str, start, i, LST_STYLE_DUMP);
-            for (; qe_isblank(str[i]); i++)
-                continue;
+            SET_STYLE(sbuf, start, i, LST_STYLE_DUMP);
+            i = cp_skip_blanks(str, i, n);
             for (start  = i; i < n && !qe_isblank(str[i]); i++)
                 continue;
-            SET_COLOR(str, start, i, LST_STYLE_OPCODE);
-            for (; qe_isblank(str[i]); i++)
-                continue;
+            SET_STYLE(sbuf, start, i, LST_STYLE_OPCODE);
+            i = cp_skip_blanks(str, i, n);
             while (i < n) {
                 start = i;
                 c = str[i++];
                 if (c == ';') {
                     i = n;
-                    SET_COLOR(str, start, i, LST_STYLE_COMMENT);
+                    SET_STYLE(sbuf, start, i, LST_STYLE_COMMENT);
                     continue;
                 }
                 if (qe_isdigit(c)) {
                     for (; qe_isalnum(str[i]); i++)
                         continue;
-                    SET_COLOR(str, start, i, LST_STYLE_NUMBER);
+                    SET_STYLE(sbuf, start, i, LST_STYLE_NUMBER);
                     continue;
                 }
                 if (qe_isalpha_(c)) {
                     i += ustr_get_identifier(kbuf, countof(kbuf), c, str, i, n);
                     if (strfind(syn->keywords, kbuf))
-                        SET_COLOR(str, start, i, LST_STYLE_KEYWORD);
+                        SET_STYLE(sbuf, start, i, LST_STYLE_KEYWORD);
                     continue;
                 }
             }
@@ -282,12 +279,12 @@ static void lst_colorize_line(QEColorizeContext *cp,
             }
             cp->colorize_state &= ~IN_LST_MASK;
             if (colstate & IN_LST_CODE_C) {
-                c_mode.colorize_func(cp, str, n, &c_mode);
+                cp_colorize_line(cp, str, 0, n, sbuf, &c_mode);
             } else
             if (colstate & IN_LST_CODE_CPP) {
-                cpp_mode.colorize_func(cp, str, n, &cpp_mode);
+                cp_colorize_line(cp, str, 0, n, sbuf, &cpp_mode);
             } else {
-                SET_COLOR(str, 0, n, LST_STYLE_OUTPUT);
+                SET_STYLE(sbuf, 0, n, LST_STYLE_OUTPUT);
             }
             colstate &= IN_LST_MASK;
             colstate |= cp->colorize_state & ~IN_LST_MASK;
@@ -303,9 +300,9 @@ static ModeDef arm_lst_mode = {
     .keywords = arm_registers,
 };
 
-static int arm_lst_init(void)
+static int arm_lst_init(QEmacsState *qs)
 {
-    qe_register_mode(&arm_lst_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &arm_lst_mode, MODEF_SYNTAX);
     return 0;
 }
 
@@ -323,7 +320,8 @@ enum {
 };
 
 static void intel_hex_colorize_line(QEColorizeContext *cp,
-                                    char32_t *str, int n, ModeDef *syn)
+                                    const char32_t *str, int n,
+                                    QETermStyle *sbuf, ModeDef *syn)
 {
     if (n > 10 && str[0] == ':') {
         /* Hex Load format: `:SSOOOOTTxx...xxCC` */
@@ -339,12 +337,12 @@ static void intel_hex_colorize_line(QEColorizeContext *cp,
         chksum = qe_digit_value(str[i]) << 4;
         chksum += qe_digit_value(str[i + 1]);
 
-        SET_COLOR(str, 0, 1, INTEL_HEX_STYLE_LEAD);
-        SET_COLOR(str, 1, 3, INTEL_HEX_STYLE_SIZE);
-        SET_COLOR(str, 3, 7, INTEL_HEX_STYLE_OFFSET);
-        SET_COLOR(str, 7, 9, INTEL_HEX_STYLE_RECTYPE);
-        SET_COLOR(str, 9, n - 2, INTEL_HEX_STYLE_DUMP);
-        SET_COLOR(str, n - 2, n, (chksum == sum) ?
+        SET_STYLE(sbuf, 0, 1, INTEL_HEX_STYLE_LEAD);
+        SET_STYLE(sbuf, 1, 3, INTEL_HEX_STYLE_SIZE);
+        SET_STYLE(sbuf, 3, 7, INTEL_HEX_STYLE_OFFSET);
+        SET_STYLE(sbuf, 7, 9, INTEL_HEX_STYLE_RECTYPE);
+        SET_STYLE(sbuf, 9, n - 2, INTEL_HEX_STYLE_DUMP);
+        SET_STYLE(sbuf, n - 2, n, (chksum == sum) ?
                   INTEL_HEX_STYLE_CHECKSUM : INTEL_HEX_STYLE_ERROR);
     }
 }
@@ -371,19 +369,19 @@ static ModeDef intel_hex_mode = {
     .colorize_func = intel_hex_colorize_line,
 };
 
-static int intel_hex_init(void)
+static int intel_hex_init(QEmacsState *qs)
 {
-    qe_register_mode(&intel_hex_mode, MODEF_SYNTAX);
+    qe_register_mode(qs, &intel_hex_mode, MODEF_SYNTAX);
     return 0;
 }
 
 /*----------------*/
 
-static int arm_modes_init(void)
+static int arm_modes_init(QEmacsState *qs)
 {
-    arm_asm_init();
-    arm_lst_init();
-    intel_hex_init();
+    arm_asm_init(qs);
+    arm_lst_init(qs);
+    intel_hex_init(qs);
     return 0;
 }
 

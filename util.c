@@ -2,7 +2,7 @@
  * Utilities for qemacs.
  *
  * Copyright (c) 2001 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2025 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -139,7 +139,16 @@ int find_file_next(FindFileState *s, char *filename, int filename_size_max) {
             s->bufptr = p;
             s->dir = opendir(s->dirpath);
         } else {
-            if (dirent->d_type == DT_DIR) {
+            int isdir = 0;
+#ifdef __MINT__ // only glibc defines _DIRENT_HAVE_D_TYPE
+            // Work around missing d_type
+            char tmppath[MAX_FILENAME_SIZE];
+            makepath(tmppath, sizeof(tmppath), s->dirpath, dirent->d_name);
+            isdir = is_directory(tmppath);
+#else
+            isdir = (dirent->d_type == DT_DIR);
+#endif
+            if (isdir) {
                 if (*dirent->d_name == '.'
                 &&  (strequal(dirent->d_name, ".") || strequal(dirent->d_name, ".."))) {
                     if (s->flags & FF_NOXXDIR)
@@ -278,7 +287,7 @@ static void canonicalize_path1(char *buf, int buf_size, const char *path) {
     }
 }
 
-void canonicalize_path(char *buf, int buf_size, const char *path) {
+char *canonicalize_path(char *buf, int buf_size, const char *path) {
     /*@API utils
        Normalize a path, removing redundant `.`, `..` and `/` parts.
        @argument `buf` a pointer to the destination array
@@ -287,28 +296,37 @@ void canonicalize_path(char *buf, int buf_size, const char *path) {
        @note this function accepts drive and protocol specifications.
        @note removing `..` may have adverse side effects if the parent
        directory specified is a symbolic link.
+       @note: source can start inside the destination array.
      */
-    const char *p;
+    char tmp[MAX_FILENAME_SIZE];
+    char *res = buf;
+    size_t prefix;
 
-    /* check for URL protocol or windows drive */
-    /* CG: should not skip '/' */
-    /* XXX: bogus if filename contains ':' */
-    p = strchr(path, ':');
-    if (p) {
-        if ((p - path) == 1) {
+    if (path >= buf && path < buf + buf_size) {
+        /* brute force partial overlapping case */
+        pstrcpy(tmp, sizeof tmp, path);
+        path = tmp;
+    }
+
+    /* check for URL protocol or MSDOS/windows drive */
+    prefix = strcspn(path, "/:");
+    if (path[prefix] == ':') {
+        if (prefix == 2) {
             /* windows drive: we canonicalize only the following path */
-            buf[0] = p[0];
-            buf[1] = p[1];
-            /* CG: this will not work for non current drives */
-            canonicalize_path1(buf + 2, buf_size - 2, p);
+            /* XXX: this will not work for non current drives */
+            *buf++ = *path++;
+            *buf++ = *path++;
+            buf_size -= 2;
         } else {
             /* URL: it is already canonical */
-            pstrcpy(buf, buf_size, path);
+            /* XXX: bogus if filename contains ':' before the first `/` */
+            /* XXX: bogus for ftp: and file: specifications */
+            return pstrcpy(buf, buf_size, path);
         }
-    } else {
-        /* simple unix path */
-        canonicalize_path1(buf, buf_size, path);
     }
+    canonicalize_path1(buf, buf_size, path);
+    /* return original destination array */
+    return res;
 }
 
 char *make_user_path(char *buf, int buf_size, const char *path) {
@@ -613,6 +631,7 @@ int qe_strcollate(const char *s1, const char *s2) {
      * use lexicographical order
      * collate sequences of digits in numerical order.
      * push `*` at the end.
+     * '/' compares lower than `\0`.
      */
     int last, c1, c2, res, flags;
 
@@ -628,6 +647,12 @@ int qe_strcollate(const char *s1, const char *s2) {
             break;
         }
     }
+    if (c1 == '/')
+        res = (c2 == '\0') ? 1 : -1;
+    else
+    if (c2 == '/')
+        res = (c1 == '\0') ? -1 : 1;
+    else
     if (c1 == '*')
         res = 1;
     else
@@ -691,8 +716,22 @@ void qe_strtolower(char *buf, int size, const char *str) {
     }
 }
 
-int memfind(const char *list, const char *s, int len) {
+int qe_haslower(const char *str) {
     /*@API utils
+       Check if a C string contains has ASCII lowercase letters.
+       @argument `str` a valid pointer to a C string
+       @return a boolean value, non zero if and only if the string contains
+       ASCII lowercase letters.
+     */
+    while (*str) {
+        if (qe_islower((unsigned char)*str++))
+            return 1;
+    }
+    return 0;
+}
+
+int memfind(const char *list, const char *s, int len) {
+    /*@API utils.string
        Find a string fragment in a list of words separated by `|`.
        An initial or trailing `|` do not match the empty string, but `||` does.
        @argument `list` a string of words separated by `|` characters.
@@ -727,7 +766,7 @@ int memfind(const char *list, const char *s, int len) {
 }
 
 int strfind(const char *keytable, const char *str) {
-    /*@API utils
+    /*@API utils.string
        Find a string in a list of words separated by `|`.
        An initial or trailing `|` do not match the empty string, but `||` does.
        @argument `list` a string of words separated by `|` characters.
@@ -738,7 +777,7 @@ int strfind(const char *keytable, const char *str) {
 }
 
 int strxfind(const char *list, const char *s) {
-    /*@API utils
+    /*@API utils.string
        Find a string in a list of words separated by `|`, ignoring case
        for ASCII and skipping `-` , `_` and spaces.
        An initial or trailing `|` do not match the empty string, but `||` does.
@@ -793,7 +832,7 @@ int strxfind(const char *list, const char *s) {
 }
 
 const char *strmem(const char *str, const void *mem, int size) {
-    /*@API utils
+    /*@API utils.string
        Find a chunk of characters inside a string.
        @argument `str` a valid string pointer in which to search for matches.
        @argument `mem` a pointer to a chunk of bytes to search.
@@ -829,7 +868,7 @@ const char *strmem(const char *str, const void *mem, int size) {
 }
 
 const void *memstr(const void *buf, int size, const char *str) {
-    /*@API utils
+    /*@API utils.string
        Find a string in a chunk of memory.
        @argument `buf` a valid pointer to the block of memory in which to
        search for matches.
@@ -862,7 +901,7 @@ const void *memstr(const void *buf, int size, const char *str) {
 }
 
 int qe_memicmp(const void *p1, const void *p2, size_t count) {
-    /*@API utils
+    /*@API utils.string
        Perform a case independent comparison of blocks of memory.
        @argument `p1` a valid pointer to the first block.
        @argument `p2` a valid pointer to the second block.
@@ -887,7 +926,7 @@ int qe_memicmp(const void *p1, const void *p2, size_t count) {
 }
 
 const char *qe_stristr(const char *s1, const char *s2) {
-    /*@API utils
+    /*@API utils.string
        Find an ASCII string in another ASCII string, ignoring case.
        @argument `s1` a valid pointer to the string in which to
        search for matches.
@@ -919,7 +958,7 @@ const char *qe_stristr(const char *s1, const char *s2) {
 }
 
 int stristart(const char *str, const char *val, const char **ptr) {
-    /*@API utils
+    /*@API utils.string
        Test if `val` is a prefix of `str` (case independent for ASCII).
        If there is a match, a pointer to the next character after the
        match in `str` is stored into `ptr` provided `ptr` is not null.
@@ -946,7 +985,7 @@ int stristart(const char *str, const char *val, const char **ptr) {
 }
 
 int strxstart(const char *str, const char *val, const char **ptr) {
-    /*@API utils
+    /*@API utils.string
        Test if `val` is a prefix of `str` (case independent for ASCII
        and ignoring `-`, `_` and spaces).  If there is a match, a pointer
        to the next character after the match in `str` is stored into `ptr`,
@@ -981,7 +1020,7 @@ int strxstart(const char *str, const char *val, const char **ptr) {
 }
 
 int strxcmp(const char *str1, const char *str2) {
-    /*@API utils
+    /*@API utils.string
        Compare strings case independently (for ASCII), also ignoring
        spaces, dashes and underscores.
        @param `str1` a valid string pointer for the left operand.
@@ -1013,7 +1052,7 @@ int strxcmp(const char *str1, const char *str2) {
 }
 
 int strmatchword(const char *str, const char *val, const char **ptr) {
-    /*@API utils
+    /*@API utils.string
        Check if `val` is a word prefix of `str`. In this case, return
        `true` and store a pointer to the first character after the prefix
        in `str` into `ptr` provided `ptr` is not a null pointer.
@@ -1035,7 +1074,7 @@ int strmatchword(const char *str, const char *val, const char **ptr) {
 }
 
 int strmatch_pat(const char *str, const char *pat, int start) {
-    /*@API utils
+    /*@API utils.string
        Check if the pattern `pat` matches `str` or a prefix of `str`.
        Patterns use only `*` as a wildcard, to match any sequence of
        characters.
@@ -1067,7 +1106,7 @@ int strmatch_pat(const char *str, const char *pat, int start) {
 }
 
 int utf8_strimatch_pat(const char *str, const char *pat, int start) {
-    /*@API utils
+    /*@API utils.string
        Check if the pattern `pat` matches `str` or a prefix of `str`,
        using a case insensitive comparison.  Patterns use only `*` as
        a wildcard, to match any sequence of characters.
@@ -1130,7 +1169,7 @@ int utf8_strimatch_pat(const char *str, const char *pat, int start) {
 
 /* used in libqhtml */
 int get_str(const char **pp, char *buf, int buf_size, const char *stop) {
-    /*@API utils
+    /*@API utils.string
        Get a token from a string, stop on a set of characters and white-space.
        Skip spaces before and after the token. Return the token length.
 
@@ -1163,7 +1202,254 @@ int get_str(const char **pp, char *buf, int buf_size, const char *stop) {
     return i;
 }
 
+/*---------------- Simple regexp matching ----------------*/
+
+static int sreg_quant(const char *re, int *min, int *max, const char **rep) {
+    switch (*re) {
+    case '?':
+        *min = 0;
+        *max = 1;
+        *rep = re + 1;
+        return TRUE;
+    case '*':
+        *min = 0;
+        /* FALLTHROUGH */
+    case '+':
+        *max = INT_MAX;
+        *rep = re + 1;
+        return TRUE;
+    case '{':
+        *min = 0;
+        re++;
+        while (*re >= '0' && *re <= '9')
+            *min = *min * 10 + (*re++ - '0');
+        *max = *min;
+        if (*re == ',') {
+            *max = INT_MAX;
+            re++;
+            if (*re != '}') {
+                *max = 0;
+                while (*re >= '0' && *re <= '9')
+                    *max = *max * 10 + (*re++ - '0');
+            }
+        }
+        re += (*re == '}');
+        *rep = re;
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+static const char *sreg_skip_class(const char *p) {
+    /* skip past a character class */
+    p += *p == '^';
+    p += *p == ']';
+    while (*p != '\0' && *p++ != ']')
+        continue;
+    return p;
+}
+
+static const char *sreg_skip(const char *p, int iter) {
+    /* skip past en enumeration */
+    int level = 0;
+    while (*p != '\0') {
+        u8 c = *p++;
+        if (c == '(') {
+            level++;
+        } else
+        if (c == '|') {
+            if (level == 0 && iter)
+                return p;
+        } else
+        if (c == ')') {
+            if (level-- == 0) {
+                /* Return null pointer at end of enumeration if iterating
+                 * otherwise return pointer past the ')'
+                 */
+                break;
+            }
+        } else
+        if (c == '[') {
+            p = sreg_skip_class(p);
+        }
+    }
+    return iter ? NULL : p;
+}
+
+static const char *sreg_match_class(const char *p, const char *re, const char *end) {
+    // FIXME: support \d... and named character classes
+    int not = *re == '^';
+    u8 c, c1, c2;
+    re += not;
+    c = *p++;
+    while (re < end) {
+        c2 = c1 = *re++;
+        if (*re == '-' && re + 1 < end) {
+            re++;
+            c2 = *re++;
+        }
+        if (c >= c1 && c <= c2)
+            return p;
+    }
+    return NULL;
+}
+
+static const char *sreg_part(const char *re, const char *p);
+
+static const char *sreg_alt(const char *start, int i, int min, int max,
+                                   const char *next, const char *p)
+{
+    const char *q;
+    const char *re = start;
+    const char *pmax = NULL;
+
+    if (i >= min && i <= max) {
+        if ((q = sreg_part(next, p)) != NULL) {
+            if (!pmax || q > pmax)
+                pmax = q;
+        }
+    }
+    if (i <= max) {
+        while (re != NULL) {
+            if ((q = sreg_part(re, p)) != NULL
+            &&  (q = sreg_alt(start, i + 1, min, max, next, q)) != NULL) {
+                if (!pmax || q > pmax)
+                    pmax = q;
+            }
+            re = sreg_skip(re, 1);
+        }
+    }
+    return pmax;
+}
+
+static const char *sreg_part(const char *re, const char *p) {
+    char c1;
+    const char *q;
+    const char *pmax;
+    const char *start;
+    const char *end;
+    int i, min, max;
+
+    for (;;) {
+        switch (c1 = *re++) {
+        case '\0':
+        case '|':
+        case ')':
+            return p;
+        case '$':
+            return *p == '\0' ? p : NULL;
+        case '(':
+            min = max = 1;
+            start = re;
+            re = sreg_skip(re, 0);
+            sreg_quant(re, &min, &max, &re);
+            return sreg_alt(start, 0, min, max, re, p);
+        case '.':
+            if (!sreg_quant(re, &min, &max, &re)) {
+                if (*p++ == '\0')
+                    return NULL;
+                break;
+            }
+            for (i = 0; i < min; i++) {
+                if (*p++ == '\0')
+                    return NULL;
+            }
+            pmax = NULL;
+            for (; i <= max; i++) {
+                if ((q = sreg_part(re, p)) != NULL) {
+                    if (!pmax || q > pmax)
+                        pmax = q;
+                }
+                if (*p++ != c1)
+                    break;
+            }
+            return pmax;
+        case '[':
+            start = re;
+            end = re = sreg_skip_class(re);
+            if (!sreg_quant(re, &min, &max, &re)) {
+                if ((p = sreg_match_class(p, start, end)) == NULL)
+                    return NULL;
+                break;
+            }
+            for (i = 0; i < min; i++) {
+                if ((p = sreg_match_class(p, start, end)) == NULL)
+                    return NULL;
+            }
+            pmax = NULL;
+            for (; i <= max; i++) {
+                if ((q = sreg_part(re, p)) != NULL) {
+                    if (!pmax || q > pmax)
+                        pmax = q;
+                }
+                if ((p = sreg_match_class(p, start, end)) == NULL)
+                    break;
+            }
+            return pmax;
+        default:
+            if (!sreg_quant(re, &min, &max, &re)) {
+                if (*p++ != c1)
+                    return NULL;
+                break;
+            }
+            for (i = 0; i < min; i++) {
+                if (*p++ != c1)
+                    return NULL;
+            }
+            pmax = NULL;
+            for (; i <= max; i++) {
+                if ((q = sreg_part(re, p)) != NULL) {
+                    if (!pmax || q > pmax)
+                        pmax = q;
+                }
+                if (*p++ != c1)
+                    break;
+            }
+            return pmax;
+        }
+    }
+}
+
+const char *sreg_match(const char *re, const char *str, int exact) {
+    /*@API utils.string
+       Check if the simple regexp pattern `pat` matches `str` or a prefix of `str`.
+       Simple regexp patterns use a subset of POSIX regexp:
+       - only simple character classes, no escape sequences
+       - no assertions (except $), no backreferences
+       - recursive groups always generate maximal matches
+       @param `re` a valid string pointer for the regexp source.
+       @param `str` a valid string pointer.
+       @return a pointer to the end of the match or NULL on mismatch.
+     */
+    const char *p = sreg_alt(re, 0, 1, 1, "", str);
+    return (p && exact && *p != '\0') ? NULL : p;
+}
+
 /*---- Unicode string functions: null terminated arrays of code points ----*/
+
+int utf8_prefix_len(const char *str1, const char *str2) {
+    /*@API utils
+       Return the length in bytes of an intial common prefix of `str1` and `str2`.
+
+       @param `str1` must be a valid UTF-8 string pointer.
+       @param `str2` must be a valid UTF-8 string pointer.
+     */
+    const char *start = str1;
+
+    while (*str1 && *str1 == *str2) {
+        if (*str1 & *str2 & 0x80) {
+            const char *p = str1;
+            if (utf8_decode(&p) != utf8_decode(&str2))
+                break;
+            str1 = p;
+        } else {
+            str1++;
+            str2++;
+        }
+    }
+    return str1 - start;
+}
 
 int ustrstart(const char32_t *str0, const char *val, int *lenp) {
     /*@API utils
@@ -1273,49 +1559,98 @@ int umemcmp(const char32_t *s1, const char32_t *s2, size_t count) {
     return 0;
 }
 
-int ustr_get_identifier(char *buf, int buf_size, char32_t c,
+int cp_skip_blanks(const char32_t *str, int i, int n) {
+    /*@API utils
+       Skip blank codepoints.
+       @argument `str` a valid pointer to an array of codepoints
+       @argument `i` the index to the next codepoint
+       @argument `n` the length of the codepoint array
+       @return the index to the next non blank codepoint or `n` if none are found.
+     */
+    while (i < n && qe_isblank(str[i]))
+        i++;
+    return i;
+}
+
+int ustr_get_identifier(char *dest, int size, char32_t c,
                         const char32_t *str, int i, int n)
 {
     /*@API utils
        Extract an ASCII identifier from a wide string into a char array.
-       @argument `buf` a valid pointer to a destination array.
-       @argument `buf_size` the length of the destination array.
-       @argument `c` the first code point to copy.
+       @argument `dest` a valid pointer to a destination array.
+       @argument `size` the length of the destination array.
+       @argument `c` the first codepoint to copy.
        @argument `str` a valid wide string pointer.
-       @argument `i` the offset of the first code point to copy.
+       @argument `i` the offset of the first codepoint to copy.
        @argument `n` the offset to the end of the wide string.
        @return the length of the identifier present in the source string.
        @note: the return value can be larger than the destination array length.
        In this case, the destination array contains a truncated string, null
-       terminated unless buf_size is <= 0.
+       terminated unless `size <= 0`.
      */
-    int len = 0, j;
+    int pos = 0, j;
 
-    if (len + 1 < buf_size) {
-        /* c is assumed to be an ASCII character */
-        buf[len++] = c;
-    }
-    for (j = i; j < n; j++) {
+    for (j = i;; j++) {
+        if (pos + 1 < size) {
+            /* c is assumed to be an ASCII character */
+            dest[pos++] = (char)c;
+        }
+        if (j >= n)
+            break;
         c = str[j];
         if (!qe_isalnum_(c))
             break;
-        if (len + 1 < buf_size)
-            buf[len++] = c;
     }
-    if (len < buf_size) {
-        buf[len] = '\0';
+    if (pos < size) {
+        dest[pos] = '\0';
     }
     return j - i;
 }
 
-int ustr_get_identifier_lc(char *buf, int buf_size, char32_t c,
+int ustr_get_identifier_x(char *dest, int size, char32_t c,
+                          const char32_t *str, int i, int n, char32_t c1)
+{
+    /*@API utils
+       Extract an ASCII identifier from a wide string into a char array.
+       @argument `dest` a valid pointer to a destination array.
+       @argument `size` the length of the destination array.
+       @argument `c` the first codepoint to copy.
+       @argument `str` a valid wide string pointer.
+       @argument `i` the offset of the first codepoint to copy.
+       @argument `n` the offset to the end of the wide string.
+       @argument `c1` a codepoint value to match in addition to `isalnum_`
+       @return the length of the identifier present in the source string.
+       @note: the return value can be larger than the destination array length.
+       In this case, the destination array contains a truncated string, null
+       terminated unless `size <= 0`.
+     */
+    int pos = 0, j;
+
+    for (j = i;; j++) {
+        if (pos + 1 < size) {
+            /* c is assumed to be an ASCII character */
+            dest[pos++] = (char)c;
+        }
+        if (j >= n)
+            break;
+        c = str[j];
+        if (!qe_isalnum_(c) && c != c1)
+            break;
+    }
+    if (pos < size) {
+        dest[pos] = '\0';
+    }
+    return j - i;
+}
+
+int ustr_get_identifier_lc(char *dest, int size, char32_t c,
                            const char32_t *str, int i, int n)
 {
     /*@API utils
        Extract an ASCII identifier from a wide string into a char array and
        convert it to lowercase.
-       @argument `buf` a valid pointer to a destination array.
-       @argument `buf_size` the length of the destination array.
+       @argument `dest` a valid pointer to a destination array.
+       @argument `size` the length of the destination array.
        @argument `c` the first code point to copy.
        @argument `str` a valid wide string pointer.
        @argument `i` the offset of the first code point to copy.
@@ -1323,35 +1658,35 @@ int ustr_get_identifier_lc(char *buf, int buf_size, char32_t c,
        @return the length of the identifier present in the source string.
        @note: the return value can be larger than the destination array length.
        In this case, the destination array contains a truncated string, null
-       terminated unless buf_size is <= 0.
+       terminated unless `size <= 0`.
      */
-    int len = 0, j;
+    int pos = 0, j;
 
-    if (len < buf_size) {
-        /* c is assumed to be an ASCII character */
-        buf[len++] = qe_tolower(c);
-    }
-    for (j = i; j < n; j++) {
+    for (j = i;; j++) {
+        if (pos + 1 < size) {
+            /* c is assumed to be an ASCII character */
+            dest[pos++] = (char)qe_tolower(c);
+        }
+        if (j >= n)
+            break;
         c = str[j];
         if (!qe_isalnum_(c))
             break;
-        if (len < buf_size - 1)
-            buf[len++] = qe_tolower(c);
     }
-    if (len < buf_size) {
-        buf[len] = '\0';
+    if (pos < size) {
+        dest[pos] = '\0';
     }
     return j - i;
 }
 
-int utf8_get_word(char *buf, int buf_size, char32_t c,
+int utf8_get_word(char *dest, int size, char32_t c,
                   const char32_t *str, int i, int n)
 {
     /*@API utils
        Extract a word from a wide string into a char array.
        Non ASCII code points are UTF-8 encoded.
-       @argument `buf` a valid pointer to a destination array.
-       @argument `buf_size` the length of the destination array.
+       @argument `dest` a valid pointer to a destination array.
+       @argument `size` the length of the destination array.
        @argument `c` the first code point to copy.
        @argument `str` a valid wide string pointer.
        @argument `i` the offset of the first code point to copy.
@@ -1359,12 +1694,12 @@ int utf8_get_word(char *buf, int buf_size, char32_t c,
        @return the length of the identifier present in the source string.
        @note: the return value can be larger than the destination array length.
        In this case, the destination array contains a truncated string, null
-       terminated unless buf_size is <= 0.
+       terminated unless `size <= 0`.
      */
     buf_t outbuf, *out;
     int j;
 
-    out = buf_init(&outbuf, buf, buf_size);
+    out = buf_init(&outbuf, dest, size);
 
     buf_putc_utf8(out, c);
     for (j = i; j < n; j++) {
@@ -1376,36 +1711,54 @@ int utf8_get_word(char *buf, int buf_size, char32_t c,
     return j - i;
 }
 
-int ustr_match_keyword(const char32_t *buf, const char *str, int *lenp) {
-    int i = 0;
-    while (str[i]) {
-        if (*buf++ != (u8)str[i++])
+int ustr_match_str(const char32_t *str, const char *p, int *lenp) {
+    /*@API utils
+       Match an ASCII string in a wide string.
+       @argument `str` a valid wide string pointer.
+       @argument `p` a valid string pointer.
+       @argument `lenp` a pointer to store the length if matched.
+       @return a boolean success value.
+       @note: the string is assumed to contain only ASCII characters.
+     */
+    int i;
+    for (i = 0; p[i]; i++) {
+        if (str[i] != (u8)p[i])
             return 0;
     }
-    if (qe_isalnum_(*buf))
-        return 0;
     if (lenp)
         *lenp = i;
     return 1;
+}
+
+int ustr_match_keyword(const char32_t *str, const char *keyword, int *lenp) {
+    /*@API utils
+       Match a keyword in a wide string.
+       @argument `str` a valid wide string pointer.
+       @argument `keyword` a valid string pointer.
+       @argument `lenp` a pointer to store the length if matched.
+       @return a boolean success value.
+       @note: the keyword is assumed to contain only ASCII characters.
+       A match requires a string match not followed by a valid ASCII
+       identifier character.
+     */
+    int len;
+    if (ustr_match_str(str, keyword, &len) && !qe_isalnum_(str[len])) {
+        if (lenp)
+            *lenp = len;
+        return 1;
+    }
+    return 0;
 }
 
 /*---------------- Functions for handling keys ----------------*/
 
 /* should move to a separate module */
 static unsigned short const keycodes[] = {
-    KEY_SPC, KEY_DEL, KEY_RET, KEY_LF, KEY_ESC, KEY_TAB, KEY_SHIFT_TAB,
-    KEY_CTRL(' '), KEY_CTRL('@'), KEY_DEL, KEY_CTRL('\\'),
-    KEY_CTRL(']'), KEY_CTRL('^'), KEY_CTRL('_'), KEY_CTRL('_'),
+    KEY_SPC, KEY_DEL, KEY_RET, KEY_LF, KEY_ESC, KEY_TAB,
     KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN,
     KEY_HOME, KEY_END, KEY_PAGEUP, KEY_PAGEDOWN,
-    KEY_CTRL_LEFT, KEY_CTRL_RIGHT, KEY_CTRL_UP, KEY_CTRL_DOWN,
-    KEY_CTRL_HOME, KEY_CTRL_END, KEY_CTRL_PAGEUP, KEY_CTRL_PAGEDOWN,
-    KEY_SHIFT_LEFT, KEY_SHIFT_RIGHT, KEY_SHIFT_UP, KEY_SHIFT_DOWN,
-    KEY_SHIFT_HOME, KEY_SHIFT_END, KEY_SHIFT_PAGEUP, KEY_SHIFT_PAGEDOWN,
-    KEY_CTRL_SHIFT_LEFT, KEY_CTRL_SHIFT_RIGHT, KEY_CTRL_SHIFT_UP, KEY_CTRL_SHIFT_DOWN,
-    KEY_CTRL_SHIFT_HOME, KEY_CTRL_SHIFT_END, KEY_CTRL_SHIFT_PAGEUP, KEY_CTRL_SHIFT_PAGEDOWN,
     KEY_PAGEUP, KEY_PAGEDOWN, KEY_INSERT, KEY_DELETE,
-    KEY_DEFAULT, KEY_NONE, KEY_UNKNOWN,
+    KEY_DEFAULT, KEY_NONE, KEY_UNKNOWN, KEY_QUIT, KEY_CLOSE, KEY_EXIT,
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5,
     KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10,
     KEY_F11, KEY_F12, KEY_F13, KEY_F14, KEY_F15,
@@ -1414,22 +1767,37 @@ static unsigned short const keycodes[] = {
 };
 
 static const char * const keystr[countof(keycodes)] = {
-    "SPC", "DEL", "RET", "LF", "ESC", "TAB", "S-TAB",
-    "C-SPC", "C-@", "C-?", "C-\\", "C-]", "C-^", "C-_", "C-/",
+    "SPC", "DEL", "RET", "LF", "ESC", "TAB",
     "left", "right", "up", "down",
     "home", "end", "pageup", "pagedown",
-    "C-left", "C-right", "C-up", "C-down",
-    "C-home", "C-end", "C-pageup", "C-pagedown",
-    "S-left", "S-right", "S-up", "S-down",
-    "S-home", "S-end", "S-pageup", "S-pagedown",
-    "C-S-left", "C-S-right", "C-S-up", "C-S-down",
-    "C-S-home", "C-S-end", "C-S-pageup", "C-S-pagedown",
     "prior", "next", "insert", "delete",
-    "default", "none", "unknown",
+    "default", "none", "unknown", "QUIT", "CLOSE", "EXIT",
     "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10",
     "f11", "f12", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20",
     "LB", "RB", "VB",
 };
+
+int find_key_suffix(const char *str, char c)
+{
+    size_t len = strlen(str);
+    int i;
+
+    if (len >= 2 && str[len - 1] == '-') {
+        if (str[len - 2] == 'M')
+            return KEY_META((u8)c);
+        if (str[len - 2] == 'C')
+            return KEY_CTRL((u8)c);
+        if (qe_isalpha((u8)str[len - 2]))
+            return 1;
+    }
+    for (i = 0; i < countof(keycodes); i++) {
+        const char *key = keystr[i];
+        size_t klen = strlen(key) - 1;
+        if (*key && klen <= len && key[klen] == c && !memcmp(key, str + len - klen, klen))
+            return keycodes[i];
+    }
+    return -1;
+}
 
 int compose_keys(unsigned int *keys, int *nb_keys)
 {
@@ -1471,7 +1839,6 @@ static int strtokey1(const char **pp)
         }
     }
 #if 0
-    /* Cannot do this because KEY_F1..KEY_F20 are not consecutive */
     if (p[0] == 'f' && p[1] >= '1' && p[1] <= '9') {
         i = p[1] - '0';
         p += 2;
@@ -1484,15 +1851,40 @@ static int strtokey1(const char **pp)
 #endif
     /* Should also support backslash escapes: \000 \x00 \u0000 */
     /* Should also support ^x and syntax and Ctrl- prefix for control keys */
-    /* Should test for p[2] in range 'a'..'z', '@'..'_', '?' */
-    if (p[0] == 'C' && p[1] == '-' && p1 == p + 3) {
-        /* control */
-        key = KEY_CTRL(p[2]);
-        *pp = p1;
-    } else {
-        key = utf8_decode(&p);
-        // XXX: Should assume unknown function key if p != p1 */
-        *pp = p;
+    key = utf8_decode(&p);
+    // XXX: Should assume unknown function key if p != p1 */
+    // FIXME: this breaks string macros: "Hello SPC world! RET" @@@
+    if (p != p1)
+        return -1;
+    *pp = p;
+    return key;
+}
+
+int get_modified_key(int key, int state) {
+    if (state & KEY_STATE_CONTROL) {
+        /* Control: generate KEY_CONTROL except for
+         * standard keys.
+         */
+        //if (key == 'h' || key == 'i' || key == 'j' || key == 'm' || key == '[')
+        //    key = KEY_CONTROL(key);
+        //else
+        if (key == ' '
+        ||  (key >= '@' && key <= 0x5F)
+        ||  (key >= 'a' && key <= 'z'))
+            key = KEY_CTRL(key);
+        else
+        if (key == '?')
+            key = 127;
+        else
+            key = KEY_CONTROL(key);
+    } else
+    if (state & KEY_STATE_SHIFT) {
+        if (key < 32 || key == 127 || KEY_IS_SPECIAL(key))
+            key = KEY_SHIFT(key);
+    }
+    if (state & (KEY_STATE_META | KEY_STATE_COMMAND)) {
+        /* Alt and Command/Hyper map to META */
+        key = KEY_META(key);
     }
     return key;
 }
@@ -1500,24 +1892,34 @@ static int strtokey1(const char **pp)
 int strtokey(const char **pp)
 {
     const char *p;
-    int key;
+    int key, state = 0;
 
     p = *pp;
-    /* Should also support A- and Alt- prefix for meta keys */
-    if (p[0] == 'M' && p[1] == '-') {
-        p += 2;
-        key = KEY_META(strtokey1(&p));
-    } else
-    if (p[0] == 'C' && p[1] == '-' && p[2] == 'M' && p[3] == '-') {
-        // XXX: this only works for ASCII control keys, not for function keys
-        /* Should pass buffer with C-xxx to strtokey1 */
-        p += 4;
-        key = KEY_META(KEY_CTRL(strtokey1(&p)));
-    } else {
-        key = strtokey1(&p);
+    while ((key = strtokey1(&p)) < 0) {
+        if (p[0] == 'M' && p[1] == '-') {
+            state |= KEY_STATE_META;
+            p += 2;
+        } else
+        if (p[0] == 'C' && p[1] == '-') {
+            state |= KEY_STATE_CONTROL;
+            p += 2;
+        } else
+        if (p[0] == 'S' && p[1] == '-') {
+            state |= KEY_STATE_SHIFT;
+            p += 2;
+        } else
+        if (state) {
+            while (*p && *p != ' ' && !(*p == ',' && p[1] == ' '))
+                p++;
+            *pp = p;
+            return KEY_UNKNOWN;
+        } else {
+            key = utf8_decode(&p);
+            break;
+        }
     }
     *pp = p;
-    return key;
+    return get_modified_key(key, state);
 }
 
 int strtokeys(const char *str, unsigned int *keys,
@@ -1544,9 +1946,15 @@ int strtokeys(const char *str, unsigned int *keys,
     return nb_keys;
 }
 
-/* Convert a key to a string representation. Recurse at most once */
-int buf_put_key(buf_t *out, int key)
-{
+int buf_put_key(buf_t *out, int key) {
+    /*@API buf
+       Encode a key as a qemacs string into a fixed length buffer
+       @argument `bp` a valid pointer to fixed length buffer
+       @argument `key` a key value
+       @return the number of bytes produced in the destination array,
+       not counting the null terminator.
+       @note Recurse at most once for meta keys.
+     */
     int i, start = out->len;
 
     for (i = 0; i < countof(keycodes); i++) {
@@ -1554,16 +1962,22 @@ int buf_put_key(buf_t *out, int key)
             return buf_puts(out, keystr[i]);
         }
     }
-    if (key >= KEY_META(0) && key <= KEY_META(0xff)) {
-        buf_puts(out, "M-");
-        buf_put_key(out, key & 0xff);
+    if (key >= 0xE200 && key < 0xF000) {
+        if ((key & KEY_META(0)) == KEY_META(0))
+            buf_puts(out, "M-");
+        if ((key & KEY_CONTROL(0)) == KEY_CONTROL(0))
+            buf_puts(out, "C-");
+        if ((key & KEY_SHIFT(0)) == KEY_SHIFT(0))
+            buf_puts(out, "S-");
+        // Should handle special cases: C-i... @@@
+        if (key & 0x100)
+            buf_put_key(out, key & ~0xE00);
+        else
+            buf_put_key(out, key & 0xff);
     } else
-    if (key >= KEY_META(KEY_ESC1(0)) && key <= KEY_META(KEY_ESC1(0xff))) {
-        buf_puts(out, "M-");
-        buf_put_key(out, KEY_ESC1(key & 0xff));
-    } else
-    if (key >= KEY_CTRL('a') && key <= KEY_CTRL('z')) {
-        buf_printf(out, "C-%c", key + 'a' - 1);
+        // FIXME: handle @-_  @@@
+    if (key >= KEY_CTRL('@') && key <= KEY_CTRL('_')) {
+        buf_printf(out, "C-%c", qe_tolower(key + 'A' - 1));
     } else {
         buf_putc_utf8(out, key);
     }
@@ -1572,6 +1986,14 @@ int buf_put_key(buf_t *out, int key)
 
 int buf_put_keys(buf_t *out, unsigned int *keys, int nb_keys)
 {
+    /*@API buf
+       Encode a sequence of keys as a qemacs strings into a fixed length buffer
+       @argument `bp` a valid pointer to fixed length buffer
+       @argument `keys` a valid pointer to an array of keys
+       @argument `nb_keys` the number of keys to encode.
+       @return the number of bytes produced in the destination array,
+       not counting the null terminator.
+     */
     int i, start = out->len;
 
     for (i = 0; i < nb_keys; i++) {
@@ -1580,6 +2002,10 @@ int buf_put_keys(buf_t *out, unsigned int *keys, int nb_keys)
         buf_put_key(out, keys[i]);
     }
     return out->len - start;
+}
+
+int is_shift_key(int key) {
+    return qe_isupper(key) || KEY_IS_SHIFT(key);
 }
 
 /*---- StringArray functions ----*/
@@ -1613,7 +2039,7 @@ StringItem *add_string(StringArray *cs, const char *str, int group) {
         return NULL;
     if (cs->nb_items >= cs->nb_allocated) {
         int n = cs->nb_allocated + 32;
-        if (!qe_realloc(&cs->items, n * sizeof(StringItem *)))
+        if (!qe_realloc_array(&cs->items, n))
             return NULL;
         cs->nb_allocated = n;
     }
@@ -1637,6 +2063,27 @@ int remove_string(StringArray *cs, const char *str) {
     return count;
 }
 
+void sort_strings(StringArray *cs, int (*sort_func)(const void *p1, const void *p2))
+{
+    qsort(cs->items, cs->nb_items, sizeof(StringItem *), sort_func);
+}
+
+int remove_duplicate_strings(StringArray *cs) {
+    int i, j, count = 0;
+    if (cs && cs->nb_items > 1) {
+        for (i = j = 1; i < cs->nb_items; i++) {
+            if (cs->items[i] && strcmp(cs->items[i]->str, cs->items[j - 1]->str)) {
+                cs->items[j++] = cs->items[i];
+            } else {
+                qe_free(&cs->items[i]);
+                count++;
+            }
+        }
+        cs->nb_items = j;
+    }
+    return count;
+}
+
 void free_strings(StringArray *cs) {
     int i;
     for (i = 0; i < cs->nb_items; i++)
@@ -1649,6 +2096,15 @@ void free_strings(StringArray *cs) {
 
 int buf_write(buf_t *bp, const void *src, int size)
 {
+    /*@API buf
+       Write an array of bytes to a fixed length buffer.
+       @argument `bp` a valid pointer to fixed length buffer
+       @argument `src` a valid pointer to an array of bytes
+       @argument `size` the number of bytes to write.
+       @return the number of bytes actually written.
+       @note content is truncated if it does not fit in the available
+       space in the destination buffer.
+     */
     int n = 0;
 
     if (bp->pos < bp->size) {
@@ -1665,26 +2121,44 @@ int buf_write(buf_t *bp, const void *src, int size)
 
 int buf_printf(buf_t *bp, const char *fmt, ...)
 {
+    /*@API buf
+       Format contents at the end of a fixed length buffer.
+       @argument `bp` a valid pointer to fixed length buffer
+       @argument `fmt` a valid pointer to a format string
+       @return the number of bytes actually written.
+     */
     va_list ap;
+    char *dest = NULL;
+    int size = 0;
+    int written = 0;
     int len;
 
+    if (bp->pos < bp->size) {
+        dest = bp->buf + bp->pos;
+        size = bp->size - bp->pos;
+    }
     va_start(ap, fmt);
-    len = vsnprintf(bp->buf + bp->len,
-                    (bp->pos < bp->size) ? bp->size - bp->pos : 1, fmt, ap);
+    len = vsnprintf(dest, size, fmt, ap);
     va_end(ap);
 
-    bp->pos += len;
-    bp->len += len;
-    if (bp->len >= bp->size) {
-        bp->len = bp->size - 1;
-        if (bp->len < 0)
-            bp->len = 0;
+    if (bp->pos < bp->size) {
+        written = (len < size) ? len : size - 1;
+        bp->len += written;
     }
-    return len;
+    bp->pos += len;
+    return written;
 }
 
 int buf_putc_utf8(buf_t *bp, char32_t c)
 {
+    /*@API buf
+       Encode a codepoint in UTF-8 at the end of a fixed length buffer.
+       @argument `bp` a valid pointer to fixed length buffer
+       @argument `c` a valid codepoint to encode
+       @return the number of bytes actually written.
+       @note: if the conversion does not fit in the destination, the
+       `len` field is not updated to avoid partial UTF-8 sequences.
+     */
     if (c < 0x80) {
         bp->pos++;
         if (bp->pos < bp->size) {
@@ -1731,37 +2205,15 @@ int strsubst(char *buf, int buf_size, const char *from,
     return out->pos;
 }
 
-int byte_quote(char *dest, int size, unsigned char c) {
-    buf_t buf[1];
-    buf_init(buf, dest, size);
-    return buf_encode_byte(buf, c);
-}
-
-int strquote(char *dest, int size, const char *str, int len) {
-    buf_t out[1];
-    buf_init(out, dest, size);
-    if (str) {
-        int i;
-        if (len < 0)
-            len = strlen(str);
-        buf_put_byte(out, '"');
-        for (i = 0; i < len; i++)
-            buf_encode_byte(out, str[i]);
-        buf_put_byte(out, '"');
-        return out->pos;
-    } else {
-        return buf_puts(out, "null");
-    }
-}
-
-#if 0
-/* TODO */
-int strunquote(char *dest, int size, const char *str, int len)
-{
-}
-#endif
-
-int buf_encode_byte(buf_t *out, unsigned char ch) {
+int byte_quote(char *dest, int size, unsigned char ch) {
+    /*@API utils.string
+       Encode a byte as a source code escape sequence
+       @argument `dest` a valid pointer to an array of bytes
+       @argument `size` the length of the destination array
+       @argument `ch` a byte value to encode as source
+       @return the number of bytes produced in the destination array,
+       not counting the null terminator
+     */
     int c;
     if (((void)(c = 'n'), ch == '\n')
     ||  ((void)(c = 'r'), ch == '\r')
@@ -1772,20 +2224,187 @@ int buf_encode_byte(buf_t *out, unsigned char ch) {
     ||  ((void)(c = '\''), ch == '\'')      // XXX: need flag to make this optional
     ||  ((void)(c = '\"'), ch == '\"')      // XXX: need flag to make this optional
     ||  ((void)(c = '\\'), ch == '\\')) {
-        return buf_printf(out, "\\%c", c);
+        return snprintf(dest, size, "\\%c", c);
     } else
     if (ch < 32) {
         //if (*p == '\e' && col > 9) {
         //    eb_write(b, b->total_size, "\n         ", 10);
         //    col = 9;
         //}
-        return buf_printf(out, "\\^%c", (ch + '@') & 127);      // XXX: need flag to make this optional
+        return snprintf(dest, size, "\\^%c", (ch + '@') & 127);      // XXX: need flag to make this optional
     } else
     if (ch < 127) {
-        return buf_put_byte(out, ch);
+        if (size > 1) {
+            dest[0] = ch;
+            dest[1] = '\0';
+        } else
+        if (size > 0) {
+            dest[0] = '\0';
+        }
+        return 1;
     } else {
-        return buf_printf(out, "\\0x%02X", ch);      // XXX: need flag to make this optional
+        return snprintf(dest, size, "\\0x%02X", ch);      // XXX: need flag to make this optional
     }
+}
+
+int strquote(char *dest, int size, const char *str, int len) {
+    /*@API utils.string
+       Encode a string using source code escape sequences
+       @argument `dest` a valid pointer to an array of bytes
+       @argument `size` the length of the destination array
+       @argument `src` a pointer to a string to encode
+       @argument `len` the number of bytes to encode
+       @return the length of the converted string, not counting the null
+       terminator, possibly longer than the destination array length.
+       @note if `src` is a null pointer, the string `null` is output
+       otherwise a double quoted string is produced.
+     */
+    buf_t out[1];
+    buf_init(out, dest, size);
+    if (str) {
+        int i;
+        if (len < 0)
+            len = strlen(str);
+        buf_put_byte(out, '"');
+        for (i = 0; i < len; i++)
+            buf_quote_byte(out, str[i]);
+        buf_put_byte(out, '"');
+    } else {
+        buf_puts(out, "null");
+    }
+    return out->pos;
+}
+
+#if 0
+/* TODO */
+int strunquote(char *dest, int size, const char *str, int len)
+{
+}
+#endif
+
+int buf_quote_byte(buf_t *bp, unsigned char ch) {
+    /*@API buf
+       Encode a byte as a source code escape sequence into a fixed length buffer
+       @argument `bp` a valid pointer to fixed length buffer
+       @argument `ch` a byte value to encode as source
+       @return the number of bytes produced in the destination array,
+       not counting the null terminator
+     */
+    char *dest = NULL;
+    int size = 0;
+    int written = 0;
+    int len;
+
+    if (bp->pos < bp->size) {
+        dest = bp->buf + bp->pos;
+        size = bp->size - bp->pos;
+    }
+    len = byte_quote(dest, size, ch);
+    if (bp->pos < bp->size) {
+        written = (len < size) ? len : size - 1;
+        bp->len += written;
+    }
+    bp->pos += len;
+    return written;
+}
+
+/*---------------- base 64 encoding ----------------*/
+
+char *qe_encode64(const void *src, size_t len, size_t *sizep)
+{
+    const u8 *p = src;
+    size_t size = (len + 2) / 3 * 4 + 1;
+    size_t j = 0;
+    char *buf = qe_malloc_bytes(size);
+    if (buf != NULL) {
+        static const char dict[64] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        size_t i;
+        uint32_t val;
+        for (i = 0; i + 2 < len; i += 3) {
+            val = (p[i] << 16) | (p[i + 1] << 8) | p[i + 2];
+            buf[j++] = dict[val >> 18];
+            buf[j++] = dict[(val >> 12) & 0x3f];
+            buf[j++] = dict[(val >> 6) & 0x3f];
+            buf[j++] = dict[val & 0x3f];
+        }
+        switch (len - i) {
+        case 2:
+            val = (p[i] << 16) | (p[i + 1] << 8);
+            buf[j++] = dict[val >> 18];
+            buf[j++] = dict[(val >> 12) & 0x3f];
+            buf[j++] = dict[(val >> 6) & 0x3f];
+            buf[j++] = '=';
+            break;
+        case 1:
+            val = p[i] << 16;
+            buf[j++] = dict[val >> 18];
+            buf[j++] = dict[(val >> 12) & 0x3f];
+            buf[j++] = '=';
+            buf[j++] = '=';
+            break;
+        default:
+        case 0:
+            break;
+        }
+        buf[j] = '\0';
+    }
+    *sizep = j;
+    return buf;
+}
+
+void *qe_decode64(const char *src, size_t len, size_t *sizep)
+{
+    size_t size = (len + 3) / 4 * 3 + 1;
+    size_t j = 0;
+    u8 *buf = qe_malloc_bytes(size);
+    if (buf != NULL) {
+        int shift = 0;
+        size_t i;
+        for (i = 0; i < len; i++) {
+            //static const char Base64[] =
+            //	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            char ch = src[i];
+            int val = ch & 0xff;
+            if (ch == '=')
+                break;
+            if (ch >= 'A' && ch <= 'Z')
+                val -= 'A';
+            else
+            if (ch >= 'a' && ch <= 'z')
+                val -= 'a' - 26;
+            else
+            if (ch >= '0' && ch <= '9')
+                val -= '0' - 52;
+            else
+            if (ch == '+')
+                val = 62;
+            else
+            if (ch == '/')
+                val = 63;
+            else
+                continue;
+            switch (shift++ & 3) {
+            case 0:
+                buf[j] = val << 2;
+                break;
+            case 1:
+                buf[j++] |= val >> 4;
+                buf[j] = (val << 4) & 0xff;
+                break;
+            case 2:
+                buf[j++] |= val >> 2;
+                buf[j] = (val << 6) & 0xff;
+                break;
+            case 3:
+                buf[j++] |= val;
+                break;
+            }
+        }
+        buf[j] = '\0';
+    }
+    *sizep = j;
+    return buf;
 }
 
 /*---------------- allocation routines ----------------*/
@@ -1815,7 +2434,7 @@ void *qe_mallocz_bytes(size_t size) {
     return p;
 }
 
-void *qe_malloc_dup(const void *src, size_t size) {
+void *qe_malloc_dup_bytes(const void *src, size_t size) {
     /*@API memory
        Allocate a block of memory of a given size in bytes initialized
        as a copy of an existing object.
@@ -1839,13 +2458,29 @@ char *qe_strdup(const char *str) {
      */
     size_t size = strlen(str) + 1;
     char *p = (malloc)(size);
-
     if (p)
         memcpy(p, str, size);
     return p;
 }
 
-void *qe_realloc(void *pp, size_t size) {
+char *qe_strndup(const char *str, size_t n) {
+    /*@API memory
+       Allocate a copy of a portion of a string.
+       @argument `src` a valid pointer to a string to duplicate.
+       @argument `n` the number of characters to duplicate.
+       @return a pointer to allocated memory, aligned on the maximum
+       alignment size.
+     */
+    size_t len = strnlen(str, n);
+    char *p = (malloc)(len + 1);
+    if (p) {
+        memcpy(p, str, len);
+        p[len] = '\0';
+    }
+    return p;
+}
+
+void *qe_realloc_bytes(void *pp, size_t size) {
     /*@API memory
        reallocate a block of memory to a different size.
        @argument `pp` the address of a possibly null pointer to a
@@ -1904,9 +2539,9 @@ bstr_t bstr_token(const char *s, int sep, const char **pp) {
             continue;
 
         bs.len = s - bs.s;
-        if (pp) {
-            *pp = *s ? s + 1 : NULL;
-        }
+    }
+    if (pp) {
+        *pp = (s && *s) ? s + 1 : NULL;
     }
     return bs;
 }
@@ -2108,7 +2743,7 @@ void qe_qsort_r(void *base, size_t nmemb, size_t size, void *thunk,
 #include "wcwidth.c"
 
 #ifdef CONFIG_TINY
-char32_t qe_unaccent(char32_t c) { return c; }
+char32_t qe_wcunaccent(char32_t c) { return c; }
 char32_t qe_wctolower(char32_t c) { return qe_tolower(c); }
 char32_t qe_wctoupper(char32_t c) { return qe_toupper(c); }
 #endif
@@ -2250,6 +2885,14 @@ char32_t utf8_decode(const char **pp) {
     }
     *pp = (const char *)p;
     return c;
+}
+
+char32_t utf8_decode_prev(const char **pp, const char *start) {
+    const char *p = *pp;
+    while (p > start && (*--p & 0xC0) == 0x80)
+        continue;
+    *pp = p;
+    return utf8_decode(&p);
 }
 
 int utf8_encode(char *q0, char32_t c) {

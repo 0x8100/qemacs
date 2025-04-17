@@ -2,7 +2,7 @@
  * MS Windows driver for QEmacs
  *
  * Copyright (c) 2002 Fabrice Bellard.
- * Copyright (c) 2002-2023 Charlie Gordon.
+ * Copyright (c) 2002-2024 Charlie Gordon.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -38,6 +38,7 @@ typedef struct WinWindow {
     HWND w;
     HDC hdc;
     HFONT font;
+    QEmacsState *qs;
 } WinWindow;
 
 typedef struct QEEventQ {
@@ -128,7 +129,7 @@ static void init_application(void)
     RegisterClass(&wc);
 }
 
-static int win_init(QEditScreen *s, int w, int h)
+static int win_init(QEditScreen *s, QEmacsState *qs, int w, int h)
 {
     int xsize, ysize, font_ysize;
     TEXTMETRIC tm;
@@ -140,7 +141,9 @@ static int win_init(QEditScreen *s, int w, int h)
 
     s->priv_data = NULL;
     s->media = CSS_MEDIA_SCREEN;
+    s->qs = qs;
 
+    win_ctx.qs = qs;
     win_ctx.font = CreateFont(-12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                               FIXED_PITCH, "fixed");
 
@@ -216,6 +219,7 @@ static void push_event(QEEvent *ev)
 static void push_key(int key)
 {
     QEEvent ev;
+    qe_event_clear(&ev);
     ev.type = QE_KEY_EVENT;
     ev.key_event.key = key;
     push_event(&ev);
@@ -361,9 +365,10 @@ LRESULT CALLBACK qe_wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_SIZE:
         if (wParam != SIZE_MINIMIZED) {
-            QEmacsState *qs = &qe_state;
+            QEmacsState *qs = win_ctx.qs;
             QEEvent ev;
 
+            qe_event_clear(&ev);
             qs->screen->width = LOWORD(lParam);
             qs->screen->height = HIWORD(lParam);
             ev.expose_event.type = QE_EXPOSE_EVENT;
@@ -378,7 +383,7 @@ LRESULT CALLBACK qe_wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             saved_hdc = win_ctx.hdc;
             win_ctx.hdc = ps.hdc;
             SelectObject(win_ctx.hdc, win_ctx.font);
-            do_refresh(NULL);
+            do_refresh(qs->active_window);
 
             EndPaint(win_ctx.w, &ps);
             win_ctx.hdc = saved_hdc;
@@ -534,12 +539,15 @@ static QEDisplay win32_dpy = {
     NULL, /* dpy_draw_picture */
     NULL, /* dpy_full_screen */
     NULL, /* dpy_describe */
+    NULL, /* dpy_sound_bell */
+    NULL, /* dpy_suspend */
+    qe_dpy_error, /* dpy_error */
     NULL, /* next */
 };
 
-static int win32_init(void)
+static int win32_init(QEmacsState *qs)
 {
-    return qe_register_display(&win32_dpy);
+    return qe_register_display(qs, &win32_dpy);
 }
 
 qe_module_init(win32_init);
